@@ -516,8 +516,16 @@ uninstall() {
     success 'sing-box 已卸载'
 }
 
+menu_row() {
+    local text="$1" plain width pad
+    plain=$(printf '%s' "$text" | sed $'s/\\033\\[[0-9;]*m//g')
+    width=$(printf '%s' "$plain" | wc -L)
+    pad=$((39-width)); (( pad > 0 )) || pad=0
+    printf '  ║%s%*s║\n' "$text" "$pad" ''
+}
+
 menu() {
-    local count choice header_pad state state_pad core core_width core_pad script_pad
+    local count choice state core
     while true; do
         MENU_CANCELLED=0
         INPUT_EOF=0
@@ -525,38 +533,34 @@ menu() {
         count=$(node_count) || return 1
         core=$(core_version)
         if [[ ! -x "$SINGBOX_BIN" ]]; then state='未安装'; elif svc_active; then state='运行中'; else state='已停止'; fi
-        header_pad=$((6-${#count})); (( header_pad > 0 )) || header_pad=1
-        state_pad=$((17-${#state})); (( state_pad > 0 )) || state_pad=1
-        case "$core" in 未安装) core_width=6 ;; 未知) core_width=4 ;; *) core_width=${#core} ;; esac
-        core_pad=$((23-core_width)); (( core_pad > 0 )) || core_pad=1
-        script_pad=$((20-${#SCRIPT_VERSION})); (( script_pad > 0 )) || script_pad=1
         printf '\n%s  ╔═══════════════════════════════════════╗\n' "$BLUE"
-        printf '  ║    sing-box 管理（当前节点：%s%s%s 个）%*s║\n' "$GREEN" "$count" "$BLUE" "$header_pad" ''
-        printf '  ║    sing-box 状态：%s%s%s%*s║\n' "$GREEN" "$state" "$BLUE" "$state_pad" ''
-        printf '  ║    sing-box 版本：%s%s%s%*s║\n' "$GREEN" "$core" "$BLUE" "$core_pad" ''
-        printf '  ║    管理脚本版本：%sv%s%s%*s║\n' "$GREEN" "$SCRIPT_VERSION" "$BLUE" "$script_pad" ''
+        menu_row "    ${BLUE}sing-box 管理${NC}"
+        menu_row "    当前节点数量：${GREEN}${count}${NC} 个"
+        menu_row "    sing-box 状态：${GREEN}${state}${NC}"
+        menu_row "    sing-box 版本：${GREEN}${core}${NC}"
+        menu_row "    管理脚本版本：${GREEN}v${SCRIPT_VERSION}${NC}"
         printf '  ╠═══════════════════════════════════════╣\n'
-        printf '  ║  %s基础功能%29s║\n' "$BLUE" ''
-        printf '  ║  %s[1]%s  添加节点%24s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[2]%s  查看节点%24s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[3]%s  修改节点%24s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[4]%s  删除节点%24s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[5]%s  清空所有节点%20s║\n' "$GREEN" "$BLUE" ''
+        menu_row "  ${BLUE}基础功能${NC}"
+        menu_row "  ${GREEN}[1]${NC}  添加节点"
+        menu_row "  ${GREEN}[2]${NC}  查看节点"
+        menu_row "  ${GREEN}[3]${NC}  修改节点"
+        menu_row "  ${GREEN}[4]${NC}  删除节点"
+        menu_row "  ${GREEN}[5]${NC}  清空所有节点"
         printf '  ║%39s║\n' ''
-        printf '  ║  %s服务管理%29s║\n' "$BLUE" ''
-        printf '  ║  %s[6]%s  启动 sing-box%19s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[7]%s  停止 sing-box%19s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[8]%s  重启 sing-box%19s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[9]%s  查看运行状态%20s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[10]%s 查看实时日志%20s║\n' "$GREEN" "$BLUE" ''
+        menu_row "  ${BLUE}服务管理${NC}"
+        menu_row "  ${GREEN}[6]${NC}  启动 sing-box"
+        menu_row "  ${GREEN}[7]${NC}  停止 sing-box"
+        menu_row "  ${GREEN}[8]${NC}  重启 sing-box"
+        menu_row "  ${GREEN}[9]${NC}  查看运行状态"
+        menu_row "  ${GREEN}[10]${NC} 查看实时日志"
         printf '  ║%39s║\n' ''
-        printf '  ║  %s更新与维护%27s║\n' "$BLUE" ''
-        printf '  ║  %s[11]%s 安装/更新核心%17s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[12]%s 更新管理脚本%20s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[13]%s 检查配置%24s║\n' "$GREEN" "$BLUE" ''
-        printf '  ║  %s[14]%s 一键卸载%24s║\n' "$GREEN" "$BLUE" ''
+        menu_row "  ${BLUE}更新与维护${NC}"
+        menu_row "  ${GREEN}[11]${NC} 安装/更新核心"
+        menu_row "  ${GREEN}[12]${NC} 更新管理脚本"
+        menu_row "  ${GREEN}[13]${NC} 检查配置"
+        menu_row "  ${GREEN}[14]${NC} 一键卸载"
         printf '  ║%39s║\n' ''
-        printf '  ║  %s[0]%s  退出脚本%24s║\n' "$GREEN" "$BLUE" ''
+        menu_row "  ${GREEN}[0]${NC}  退出脚本"
         printf '  ╚═══════════════════════════════════════╝%s\n\n' "$NC"
         local status=0
         read -r -p '  请输入选项 [0-14]: ' choice || status=$?
