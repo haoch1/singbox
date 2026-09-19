@@ -8,7 +8,8 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:
 SCRIPT_VERSION="0.1.0"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
-SINGBOX_BIN="${SINGBOX_BIN:-/usr/local/bin/sing-box}"
+SINGBOX_BIN="${SINGBOX_BIN:-}"
+CORE_INSTALL_BIN="/usr/local/bin/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
 META_FILE="$SINGBOX_DIR/nodes.json"
 PID_FILE="${SINGBOX_PID_FILE:-/run/sing-box/sing-box.pid}"
@@ -197,7 +198,21 @@ server_ip_guess() {
     printf '%s' "${ip//$'\n'/}"
 }
 
+resolve_core() {
+    local candidate discovered=''
+    if [[ -n "$SINGBOX_BIN" && -x "$SINGBOX_BIN" ]]; then return 0; fi
+    if discovered=$(command -v sing-box 2>/dev/null); then
+        [[ -x "$discovered" ]] && { SINGBOX_BIN="$discovered"; return 0; }
+    fi
+    for candidate in /usr/local/bin/sing-box /usr/bin/sing-box /usr/local/sbin/sing-box /usr/sbin/sing-box; do
+        [[ -x "$candidate" ]] && { SINGBOX_BIN="$candidate"; return 0; }
+    done
+    SINGBOX_BIN="$CORE_INSTALL_BIN"
+    return 1
+}
+
 core_version() {
+    resolve_core >/dev/null 2>&1 || true
     [[ -x "$SINGBOX_BIN" ]] || { printf '未安装'; return; }
     local v; v=$("$SINGBOX_BIN" version 2>/dev/null | sed -n 's/^sing-box version \([^[:space:]]*\).*/\1/p' | head -n 1)
     [[ -n "$v" ]] && printf 'v%s' "$v" || printf '未知'
@@ -241,7 +256,8 @@ build_link() {
 }
 
 check_config() {
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装'; return 1; }
+    resolve_core >/dev/null 2>&1 || true
+    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [11] 或 s --update'; return 1; }
     "$SINGBOX_BIN" check -c "$CONFIG_FILE"
 }
 
@@ -281,6 +297,7 @@ apply_transaction() {
 
 install_core() (
     local requested="${1:-latest}" temp version arch asset_name asset_url digest binary member current
+    resolve_core >/dev/null 2>&1 || true
     temp=$(mktemp -d "$SINGBOX_DIR/.core.XXXXXX") || exit 1
     trap 'rm -rf "$temp"' EXIT INT TERM
     get_url 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' "$temp/release.json" || { fail '获取 sing-box 官方版本失败'; exit 1; }
@@ -319,10 +336,13 @@ install_core() (
     success "sing-box 核心已更新至 v$version"
 )
 
-ensure_core() { [[ -x "$SINGBOX_BIN" ]] || install_core latest; }
+require_core() {
+    resolve_core >/dev/null 2>&1 || true
+    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [11] 或 s --update'; return 1; }
+}
 
 add_node() {
-    ensure_core || return 1
+    require_core || return 1
     local server port sni name id tag uuid private public sid current_count
     server=$(server_ip_guess)
     read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
@@ -453,13 +473,13 @@ clear_nodes() {
 
 start_service() {
     (( $(node_count) > 0 )) || { warn '暂无节点，无法启动 sing-box'; return 1; }
-    ensure_core || return 1; write_service_unit || return 1; svc_enable || { fail '设置开机自启失败'; return 1; }
+    require_core || return 1; write_service_unit || return 1; svc_enable || { fail '设置开机自启失败'; return 1; }
     svc_active && { success 'sing-box 已在运行'; return 0; }
     svc_start && success 'sing-box 已启动，开机自启已开启' || { fail 'sing-box 启动失败，请查看日志'; return 1; }
 }
 stop_service() { svc_stop && svc_disable >/dev/null 2>&1 || true; success 'sing-box 已停止，开机自启已关闭'; }
-restart_service() { (( $(node_count) > 0 )) || { warn '暂无节点，无法重启 sing-box'; return 1; }; ensure_core || return 1; write_service_unit && svc_enable && svc_restart && success 'sing-box 已重启' || { fail 'sing-box 重启失败'; return 1; }; }
-show_status() { if [[ ! -x "$SINGBOX_BIN" ]]; then printf '  状态: %s未安装%s\n' "$RED" "$NC"; elif svc_active; then printf '  状态: %s运行中%s\n' "$GREEN" "$NC"; else printf '  状态: %s已停止%s\n' "$YELLOW" "$NC"; fi; printf '  核心版本: %s\n  节点数量: %s\n  init 模式: %s\n' "$(core_version)" "$(node_count)" "$INIT_SYSTEM"; }
+restart_service() { (( $(node_count) > 0 )) || { warn '暂无节点，无法重启 sing-box'; return 1; }; require_core || return 1; write_service_unit && svc_enable && svc_restart && success 'sing-box 已重启' || { fail 'sing-box 重启失败'; return 1; }; }
+show_status() { resolve_core >/dev/null 2>&1 || true; if [[ ! -x "$SINGBOX_BIN" ]]; then printf '  状态: %s未安装%s\n' "$RED" "$NC"; elif svc_active; then printf '  状态: %s运行中%s\n' "$GREEN" "$NC"; else printf '  状态: %s已停止%s\n' "$YELLOW" "$NC"; fi; printf '  核心版本: %s\n  节点数量: %s\n  init 模式: %s\n' "$(core_version)" "$(node_count)" "$INIT_SYSTEM"; }
 view_logs() { [[ "$INIT_SYSTEM" == systemd ]] && { journalctl -u sing-box -f --no-pager; return; }; [[ -f "$LOG_FILE" ]] && tail -f "$LOG_FILE" || warn "日志文件不存在: $LOG_FILE"; }
 
 update_script() (
@@ -493,22 +513,48 @@ uninstall() {
 }
 
 menu() {
+    local count choice header_pad state state_pad core core_width core_pad script_pad
     while true; do
         MENU_CANCELLED=0
         INPUT_EOF=0
         [[ -t 1 ]] && printf '\033[2J\033[H'
-        printf '%s  ╔══════════════════════════════════════════╗%s\n' "$BLUE" "$NC"
-        printf '  ║        sing-box 管理脚本 v%-16s║\n' "$SCRIPT_VERSION"
-        printf '  ║  状态: %-10s 核心: %-12s 节点: %-3s║\n' "$(if svc_active; then printf '运行中'; else printf '已停止'; fi)" "$(core_version)" "$(node_count)"
-        printf '  ╠══════════════════════════════════════════╣\n'
-        printf '  ║  %s节点管理%s                              ║\n' "$CYAN" "$NC"
-        printf '  ║  [1] 添加节点       [2] 查看节点         ║\n  ║  [3] 修改节点       [4] 删除节点         ║\n  ║  [5] 清空所有节点                         ║\n' 
-        printf '  ║  %s服务管理%s                              ║\n' "$CYAN" "$NC"
-        printf '  ║  [6] 启动 sing-box  [7] 停止 sing-box    ║\n  ║  [8] 重启 sing-box  [9] 查看运行状态     ║\n  ║  [10] 查看实时日志                         ║\n'
-        printf '  ║  %s更新与维护%s                            ║\n' "$CYAN" "$NC"
-        printf '  ║  [11] 更新核心      [12] 更新管理脚本    ║\n  ║  [13] 检查配置      [14] 一键卸载         ║\n'
-        printf '  ║  [0] 退出脚本                              ║\n  ╚══════════════════════════════════════════╝\n'
-        local choice status=0
+        count=$(node_count) || return 1
+        core=$(core_version)
+        if [[ ! -x "$SINGBOX_BIN" ]]; then state='未安装'; elif svc_active; then state='运行中'; else state='已停止'; fi
+        header_pad=$((6-${#count})); (( header_pad > 0 )) || header_pad=1
+        state_pad=$((17-${#state})); (( state_pad > 0 )) || state_pad=1
+        case "$core" in 未安装) core_width=6 ;; 未知) core_width=4 ;; *) core_width=${#core} ;; esac
+        core_pad=$((23-core_width)); (( core_pad > 0 )) || core_pad=1
+        script_pad=$((20-${#SCRIPT_VERSION})); (( script_pad > 0 )) || script_pad=1
+        printf '\n%s  ╔═══════════════════════════════════════╗\n' "$BLUE"
+        printf '  ║    sing-box 管理（当前节点：%s%s%s 个）%*s║\n' "$GREEN" "$count" "$BLUE" "$header_pad" ''
+        printf '  ║    sing-box 状态：%s%s%s%*s║\n' "$GREEN" "$state" "$BLUE" "$state_pad" ''
+        printf '  ║    sing-box 版本：%s%s%s%*s║\n' "$GREEN" "$core" "$BLUE" "$core_pad" ''
+        printf '  ║    管理脚本版本：%sv%s%s%*s║\n' "$GREEN" "$SCRIPT_VERSION" "$BLUE" "$script_pad" ''
+        printf '  ╠═══════════════════════════════════════╣\n'
+        printf '  ║  %s基础功能%29s║\n' "$BLUE" ''
+        printf '  ║  %s[1]%s  添加节点%24s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[2]%s  查看节点%24s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[3]%s  修改节点%24s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[4]%s  删除节点%24s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[5]%s  清空所有节点%20s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║%39s║\n' ''
+        printf '  ║  %s服务管理%29s║\n' "$BLUE" ''
+        printf '  ║  %s[6]%s  启动 sing-box%19s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[7]%s  停止 sing-box%19s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[8]%s  重启 sing-box%19s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[9]%s  查看运行状态%20s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[10]%s 查看实时日志%20s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║%39s║\n' ''
+        printf '  ║  %s更新与维护%27s║\n' "$BLUE" ''
+        printf '  ║  %s[11]%s 安装/更新核心%17s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[12]%s 更新管理脚本%20s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[13]%s 检查配置%24s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║  %s[14]%s 一键卸载%24s║\n' "$GREEN" "$BLUE" ''
+        printf '  ║%39s║\n' ''
+        printf '  ║  %s[0]%s  退出脚本%24s║\n' "$GREEN" "$BLUE" ''
+        printf '  ╚═══════════════════════════════════════╝%s\n\n' "$NC"
+        local status=0
         read -r -p '  请输入选项 [0-14]: ' choice || status=$?
         (( status == 130 )) && interrupt_exit
         (( status != 0 )) && return 0
@@ -530,6 +576,7 @@ main() {
     exec 9>"$LOCK_FILE" || { fail '无法打开管理锁'; return 1; }
     flock -n 9 || { fail '已有 sing-box 管理脚本实例正在运行'; return 1; }
     init_state || return 1
+    resolve_core >/dev/null 2>&1 || true
     SCRIPT_TARGET="${SCRIPT_TARGET:-/usr/local/bin/s}"
     case "${1:-}" in
         --version|-v) printf 'singbox 管理脚本 v%s\n' "$SCRIPT_VERSION"; return 0 ;;

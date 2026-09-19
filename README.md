@@ -1,57 +1,76 @@
 # singbox
 
-一个面向 Linux VPS 的轻量 sing-box 管理脚本。第一版只管理 `VLESS + TCP + Reality + Vision`，菜单和交互风格参考 [haoch1/realm](https://github.com/haoch1/realm)，节点配置流程参考 [0xdabiaoge/singbox-lite](https://github.com/0xdabiaoge/singbox-lite)。
+面向 Linux VPS 的轻量 sing-box 管理脚本。当前版本提供 `VLESS + TCP + Reality + Vision` 节点的增删查改、服务控制和配置管理，脚本结构保留了后续扩展其他协议的空间。
 
 ## 功能
 
 - 节点增删查改和清空
 - VLESS + TCP + Reality + Vision
-- 默认端口 `8443`
+- 默认监听端口 `8443`
 - 默认伪装域名 `www.bing.com`
 - 默认节点名 `VLESS-TCP-REALITY-VISION-端口`
 - 自动生成 UUID、Reality 密钥和 Short ID
 - 输出可复制的 `vless://` 链接
-- systemd、Alpine OpenRC、无 init direct 模式
-- sing-box 核心安装/更新
-- 管理脚本更新
-- 配置检查、实时日志和一键卸载
+- 支持 systemd、Alpine OpenRC 和无 init 环境
+- sing-box 核心安装、更新和配置检查
+- 管理脚本更新、实时日志和一键卸载
 
 ## 一键安装
+
+使用 `root` 执行：
 
 ```sh
 (curl -LfsS https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh -o /usr/local/bin/s || wget -q https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh -O /usr/local/bin/s) && chmod +x /usr/local/bin/s && s
 ```
 
-脚本需要 root 权限，会自动安装 `bash`、`curl`、`jq`、`tar`、`flock`、`ss` 等依赖。第一次添加节点时才下载 sing-box 核心。
+安装命令只下载管理脚本，不会自动下载 sing-box 核心。脚本启动时会先检查系统内已有的 `sing-box`，优先使用 PATH 中的核心，也会检查常见安装路径。
 
-## 菜单
+脚本会自动补齐 `curl`、`jq`、`tar`、`flock`、`ss` 等管理依赖。核心需要手动处理：
+
+- 在菜单中选择 `[11] 安装/更新核心`
+- 或执行 `s --update`
+
+如果系统中没有核心，添加节点、启动、重启和配置检查会提示先完成核心安装。
+
+## 管理菜单
 
 ```text
-节点管理
-[1] 添加节点       [2] 查看节点
-[3] 修改节点       [4] 删除节点
-[5] 清空所有节点
+sing-box 管理（当前节点：0 个）
+sing-box 状态：未安装
+sing-box 版本：未安装
+管理脚本版本：v0.1.0
+
+基础功能
+[1]  添加节点
+[2]  查看节点
+[3]  修改节点
+[4]  删除节点
+[5]  清空所有节点
 
 服务管理
-[6] 启动 sing-box  [7] 停止 sing-box
-[8] 重启 sing-box  [9] 查看运行状态
+[6]  启动 sing-box
+[7]  停止 sing-box
+[8]  重启 sing-box
+[9]  查看运行状态
 [10] 查看实时日志
 
 更新与维护
-[11] 更新核心      [12] 更新管理脚本
-[13] 检查配置      [14] 一键卸载
+[11] 安装/更新核心
+[12] 更新管理脚本
+[13] 检查配置
+[14] 一键卸载
 
-[0] 退出脚本
+[0]  退出脚本
 ```
 
-添加节点时服务器地址会先尝试自动探测公网 IP，也可以手动填写域名或 IP。修改节点默认保留 UUID 和 Reality 凭据；需要更换凭据时在修改流程中选择重新生成。
+添加节点时服务器地址会先尝试自动探测公网 IP，也可以手动填写域名或 IP。端口默认使用 `8443`，伪装域名默认使用 `www.bing.com`。修改节点时默认保留 UUID 和 Reality 凭据，需要更换凭据时可以选择重新生成。
 
 ## 文件
 
 | 文件 | 用途 |
 | --- | --- |
 | `/usr/local/bin/s` | 管理脚本命令 |
-| `/usr/local/bin/sing-box` | sing-box 核心 |
+| `/usr/local/bin/sing-box` | 默认核心安装路径 |
 | `/usr/local/etc/sing-box/config.json` | sing-box 服务配置，包含私钥 |
 | `/usr/local/etc/sing-box/nodes.json` | 节点元数据和客户端公开参数 |
 | `/var/log/sing-box.log` | OpenRC/direct 日志 |
@@ -62,19 +81,8 @@
 
 ```sh
 s                 # 打开菜单
-s --update        # 更新 sing-box 核心
+s --update        # 手动安装或更新 sing-box 核心
 s --update-script # 更新管理脚本
 s --version       # 查看脚本版本
 s --uninstall     # 卸载
 ```
-
-## 测试
-
-在 Linux 环境执行：
-
-```sh
-bash tests/smoke.sh
-```
-
-测试会进行 Bash 语法检查、关键默认值检查、菜单选项检查和配置字段静态检查。若安装了 ShellCheck，也会自动运行 ShellCheck。
-
