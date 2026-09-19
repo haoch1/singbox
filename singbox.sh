@@ -518,10 +518,10 @@ uninstall() {
 
 menu_row() {
     local text="$1" plain width pad
-    plain=$(printf '%s' "$text" | sed $'s/\\033\\[[0-9;]*m//g')
+    plain=$(printf '%s' "$text" | sed $'s/\033\\[[0-9;]*m//g')
     width=$(printf '%s' "$plain" | wc -L)
     pad=$((39-width)); (( pad > 0 )) || pad=0
-    printf '  ║%s%*s║\n' "$text" "$pad" ''
+    printf '  %s║%s%*s%s║%s\n' "$BLUE" "$text" "$pad" '' "$BLUE" "$NC"
 }
 
 menu() {
@@ -534,34 +534,33 @@ menu() {
         core=$(core_version)
         if [[ ! -x "$SINGBOX_BIN" ]]; then state='未安装'; elif svc_active; then state='运行中'; else state='已停止'; fi
         printf '\n%s  ╔═══════════════════════════════════════╗\n' "$BLUE"
-        menu_row "    ${BLUE}sing-box 管理${NC}"
-        menu_row "    当前节点数量：${GREEN}${count}${NC} 个"
-        menu_row "    sing-box 状态：${GREEN}${state}${NC}"
-        menu_row "    sing-box 版本：${GREEN}${core}${NC}"
-        menu_row "    管理脚本版本：${GREEN}v${SCRIPT_VERSION}${NC}"
-        printf '  ╠═══════════════════════════════════════╣\n'
+        menu_row "    ${BLUE}sing-box 管理（当前节点：${GREEN}${count}${BLUE} 个）${NC}"
+        menu_row "    ${BLUE}sing-box 状态：${GREEN}${state}${BLUE}${NC}"
+        menu_row "    ${BLUE}sing-box 版本：${GREEN}${core}${BLUE}${NC}"
+        menu_row "    ${BLUE}管理脚本版本：${GREEN}v${SCRIPT_VERSION}${BLUE}${NC}"
+        printf '%s  ╠═══════════════════════════════════════╣%s\n' "$BLUE" "$NC"
         menu_row "  ${BLUE}基础功能${NC}"
-        menu_row "  ${GREEN}[1]${NC}  添加节点"
-        menu_row "  ${GREEN}[2]${NC}  查看节点"
-        menu_row "  ${GREEN}[3]${NC}  修改节点"
-        menu_row "  ${GREEN}[4]${NC}  删除节点"
-        menu_row "  ${GREEN}[5]${NC}  清空所有节点"
-        printf '  ║%39s║\n' ''
+        menu_row "  ${GREEN}[1]${BLUE}  添加节点${NC}"
+        menu_row "  ${GREEN}[2]${BLUE}  查看节点${NC}"
+        menu_row "  ${GREEN}[3]${BLUE}  修改节点${NC}"
+        menu_row "  ${GREEN}[4]${BLUE}  删除节点${NC}"
+        menu_row "  ${GREEN}[5]${BLUE}  清空所有节点${NC}"
+        printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${BLUE}服务管理${NC}"
-        menu_row "  ${GREEN}[6]${NC}  启动 sing-box"
-        menu_row "  ${GREEN}[7]${NC}  停止 sing-box"
-        menu_row "  ${GREEN}[8]${NC}  重启 sing-box"
-        menu_row "  ${GREEN}[9]${NC}  查看运行状态"
-        menu_row "  ${GREEN}[10]${NC} 查看实时日志"
-        printf '  ║%39s║\n' ''
+        menu_row "  ${GREEN}[6]${BLUE}  启动 sing-box${NC}"
+        menu_row "  ${GREEN}[7]${BLUE}  停止 sing-box${NC}"
+        menu_row "  ${GREEN}[8]${BLUE}  重启 sing-box${NC}"
+        menu_row "  ${GREEN}[9]${BLUE}  查看运行状态${NC}"
+        menu_row "  ${GREEN}[10]${BLUE} 查看实时日志${NC}"
+        printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${BLUE}更新与维护${NC}"
-        menu_row "  ${GREEN}[11]${NC} 安装/更新核心"
-        menu_row "  ${GREEN}[12]${NC} 更新管理脚本"
-        menu_row "  ${GREEN}[13]${NC} 检查配置"
-        menu_row "  ${GREEN}[14]${NC} 一键卸载"
-        printf '  ║%39s║\n' ''
-        menu_row "  ${GREEN}[0]${NC}  退出脚本"
-        printf '  ╚═══════════════════════════════════════╝%s\n\n' "$NC"
+        menu_row "  ${GREEN}[11]${BLUE} 安装/更新核心${NC}"
+        menu_row "  ${GREEN}[12]${BLUE} 更新管理脚本${NC}"
+        menu_row "  ${GREEN}[13]${BLUE} 检查配置${NC}"
+        menu_row "  ${GREEN}[14]${BLUE} 一键卸载${NC}"
+        printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
+        menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
+        printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
         local status=0
         read -r -p '  请输入选项 [0-14]: ' choice || status=$?
         (( status == 130 )) && interrupt_exit
