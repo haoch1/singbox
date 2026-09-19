@@ -505,10 +505,14 @@ uninstall() {
     read_input answer '  确认卸载 sing-box、全部节点和管理脚本？(y/N): ' || return 1
     [[ "$answer" == [yY] ]] || return 1
     svc_stop >/dev/null 2>&1 || true; svc_disable >/dev/null 2>&1 || true
-    [[ "$INIT_SYSTEM" == systemd ]] && { rm -f "$SYSTEMD_UNIT"; systemctl daemon-reload >/dev/null 2>&1 || true; }
-    [[ "$INIT_SYSTEM" == openrc ]] && rm -f "$OPENRC_UNIT"
+    rm -f -- "$SYSTEMD_UNIT" "$OPENRC_UNIT"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl reset-failed sing-box.service >/dev/null 2>&1 || true
+    fi
     rm -rf "$SINGBOX_DIR" "$PID_FILE" "$LOG_FILE" "$SINGBOX_BIN"
-    [[ "${SCRIPT_TARGET:-}" == /usr/local/bin/s ]] && rm -f /usr/local/bin/s
+    rm -f -- "${SCRIPT_TARGET:-/usr/local/bin/s}" "$LOCK_FILE"
+    rmdir "$(dirname "$PID_FILE")" >/dev/null 2>&1 || true
     success 'sing-box 已卸载'
 }
 
