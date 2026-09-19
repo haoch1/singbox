@@ -19,7 +19,7 @@
 ## 一键安装
 
 ```sh
-(curl -LfsS https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh -o /usr/local/bin/sb || wget -q https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh -O /usr/local/bin/sb) && chmod +x /usr/local/bin/sb && sb
+(curl -LfsS https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh -o /usr/local/bin/s || wget -q https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh -O /usr/local/bin/s) && chmod +x /usr/local/bin/s && s
 ```
 
 脚本需要 root 权限，会自动安装 `bash`、`curl`、`jq`、`tar`、`flock`、`ss` 等依赖。第一次添加节点时才下载 sing-box 核心。
@@ -50,7 +50,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `/usr/local/bin/sb` | 管理脚本命令 |
+| `/usr/local/bin/s` | 管理脚本命令 |
 | `/usr/local/bin/sing-box` | sing-box 核心 |
 | `/usr/local/etc/sing-box/config.json` | sing-box 服务配置，包含私钥 |
 | `/usr/local/etc/sing-box/nodes.json` | 节点元数据和客户端公开参数 |
@@ -61,11 +61,11 @@
 ## 命令行
 
 ```sh
-sb                 # 打开菜单
-sb --update        # 更新 sing-box 核心
-sb --update-script # 更新管理脚本
-sb --version       # 查看脚本版本
-sb --uninstall     # 卸载
+s                 # 打开菜单
+s --update        # 更新 sing-box 核心
+s --update-script # 更新管理脚本
+s --version       # 查看脚本版本
+s --uninstall     # 卸载
 ```
 
 ## 测试

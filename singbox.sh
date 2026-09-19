@@ -472,7 +472,7 @@ update_script() (
     bash -n "$temp" || { fail '新版管理脚本语法检查失败'; exit 1; }
     version=$(sed -n 's/^SCRIPT_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$temp" | head -n 1)
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { fail '新版脚本缺少有效版本号'; exit 1; }
-    target="${SCRIPT_TARGET:-/usr/local/bin/sb}"
+    target="${SCRIPT_TARGET:-/usr/local/bin/s}"
     old_hash=$(sha256sum "$target" 2>/dev/null | awk '{print $1}' || true); new_hash=$(sha256sum "$temp" | awk '{print $1}')
     [[ -n "$old_hash" && "$old_hash" == "$new_hash" ]] && { info '管理脚本已是最新版'; exit 0; }
     chmod 755 "$temp" && mv -f "$temp" "$target" || { fail '管理脚本替换失败'; exit 1; }
@@ -488,7 +488,7 @@ uninstall() {
     [[ "$INIT_SYSTEM" == systemd ]] && { rm -f "$SYSTEMD_UNIT"; systemctl daemon-reload >/dev/null 2>&1 || true; }
     [[ "$INIT_SYSTEM" == openrc ]] && rm -f "$OPENRC_UNIT"
     rm -rf "$SINGBOX_DIR" "$PID_FILE" "$LOG_FILE" "$SINGBOX_BIN"
-    [[ "${SCRIPT_TARGET:-}" == /usr/local/bin/sb ]] && rm -f /usr/local/bin/sb
+    [[ "${SCRIPT_TARGET:-}" == /usr/local/bin/s ]] && rm -f /usr/local/bin/s
     success 'sing-box 已卸载'
 }
 
@@ -530,10 +530,10 @@ main() {
     exec 9>"$LOCK_FILE" || { fail '无法打开管理锁'; return 1; }
     flock -n 9 || { fail '已有 sing-box 管理脚本实例正在运行'; return 1; }
     init_state || return 1
-    SCRIPT_TARGET="${SCRIPT_TARGET:-/usr/local/bin/sb}"
+    SCRIPT_TARGET="${SCRIPT_TARGET:-/usr/local/bin/s}"
     case "${1:-}" in
         --version|-v) printf 'singbox 管理脚本 v%s\n' "$SCRIPT_VERSION"; return 0 ;;
-        --help|-h) printf '用法: sb [--update|--update-script|--uninstall|--version]\n'; return 0 ;;
+        --help|-h) printf '用法: s [--update|--update-script|--uninstall|--version]\n'; return 0 ;;
         --update) install_core latest; return $? ;;
         --update-script) update_script; return $? ;;
         --uninstall) uninstall; return $? ;;
