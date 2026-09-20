@@ -256,12 +256,13 @@ build_link() {
 }
 
 check_config() {
+    local mode="${1:-verbose}"
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [11] 或 s --update'; return 1; }
-    info '正在检查 config.json'
+    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 或 s --update'; return 1; }
+    [[ "$mode" == quiet ]] || info '正在检查 config.json'
     local result
     if result=$("$SINGBOX_BIN" check -c "$CONFIG_FILE" 2>&1); then
-        success 'config.json 配置检查通过'
+        [[ "$mode" == quiet ]] || success 'config.json 配置检查通过'
         return 0
     fi
     fail 'config.json 配置检查失败'
@@ -285,7 +286,7 @@ apply_transaction() {
         fail '写入配置失败，已恢复原配置'
         return 1
     fi
-    if ! check_config; then
+    if ! check_config quiet; then
         cp -p "$backup/config" "$CONFIG_FILE" 2>/dev/null || true
         cp -p "$backup/meta" "$META_FILE" 2>/dev/null || true
         rm -rf "$backup"; fail '配置校验失败，未应用修改'; return 1
@@ -306,13 +307,21 @@ apply_transaction() {
 }
 
 install_core() (
-    local requested="${1:-latest}" temp version arch asset_name asset_url digest binary member current
+    local requested="${1:-latest}" temp version arch asset_name asset_url digest binary member current installed=''
     resolve_core >/dev/null 2>&1 || true
+    info '正在检查 sing-box 核心更新'
     temp=$(mktemp -d "$SINGBOX_DIR/.core.XXXXXX") || exit 1
     trap 'rm -rf "$temp"' EXIT INT TERM
     get_url 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' "$temp/release.json" || { fail '获取 sing-box 官方版本失败'; exit 1; }
     version=$(jq -er '.tag_name | sub("^v"; "") | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$temp/release.json") || { fail '官方版本信息无效'; exit 1; }
     [[ "$requested" == latest || "$requested" == "$version" ]] || { fail "固定版本不匹配: $requested"; exit 1; }
+    if [[ -x "$SINGBOX_BIN" ]]; then
+        installed=$("$SINGBOX_BIN" version 2>/dev/null | sed -n 's/^sing-box version \([^[:space:]]*\).*/\1/p' | head -n 1)
+        if [[ "$requested" == latest && "$installed" == "$version" ]]; then
+            info "sing-box 核心已是最新版本 v$version"
+            exit 0
+        fi
+    fi
     case "$(uname -m)" in
         x86_64|amd64) arch=amd64 ;;
         aarch64|arm64) arch=arm64 ;;
@@ -339,16 +348,20 @@ install_core() (
     mkdir -p "${SINGBOX_BIN%/*}" || exit 1
     mv -f "$binary" "$SINGBOX_BIN" || exit 1
     chmod 755 "$SINGBOX_BIN"
-    if [[ -s "$CONFIG_FILE" ]] && ! check_config; then
+    if [[ -s "$CONFIG_FILE" ]] && ! check_config quiet; then
         [[ -s "$temp/old" ]] && cp -p "$temp/old" "$SINGBOX_BIN" || rm -f "$SINGBOX_BIN"
         fail '新核心无法通过当前配置校验，已恢复旧核心'; exit 1
     fi
     success "sing-box 核心已更新至 v$version"
 )
 
+update_core() {
+    install_core latest || { fail 'sing-box 核心更新失败'; return 1; }
+}
+
 require_core() {
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [11] 或 s --update'; return 1; }
+    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 或 s --update'; return 1; }
 }
 
 add_node() {
@@ -401,6 +414,7 @@ print_nodes() {
     jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.port|tostring)] | @tsv' "$META_FILE" | \
         while IFS=$'\t' read -r index name port; do
             printf '  %s[%s]%s %s (vless-reality) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$BLUE" "$port" "$NC"
+            printf '\n'
         done
 }
 
@@ -418,10 +432,11 @@ view_nodes() {
     local count; count=$(node_count)
     printf '\n'; info "=== 当前节点信息（共 ${count} 个） ==="; printf '\n'
     (( count > 0 )) || { warn '暂无节点'; return 0; }
-    while IFS=$'\t' read -r name server port sni uuid public sid; do
-        printf '  %s%s%s (vless-reality) @ %s%s%s\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
+    while IFS=$'\t' read -r index name server port sni uuid public sid; do
+        printf '  %s[%s]%s %s%s%s (vless-reality) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
         printf '  VLESS 链接: %s\n' "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")"
-    done < <(jq -r '.nodes[] | [.name,.server,(.port|tostring),.sni,.uuid,.public_key,.short_id] | @tsv' "$META_FILE")
+        printf '\n'
+    done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,.value.server,(.value.port|tostring),.value.sni,.value.uuid,.value.public_key,.value.short_id] | @tsv' "$META_FILE")
 }
 
 apply_node_update() {
@@ -440,7 +455,7 @@ apply_node_update() {
 
 confirm_node_update() {
     local answer
-    read_input answer '  确认保存并应用本次修改？[Y/n]: ' || return 1
+    read_input answer '  确认保存并应用本次修改？[Y/N]: ' || return 1
     [[ "$answer" =~ ^[nN]$ ]] && { warn '已取消本次修改'; return 1; }
     return 0
 }
@@ -482,7 +497,11 @@ modify_node() {
             3)
                 read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
                 value=${value:-$port}; valid_port "$value" || { fail '端口应为 1–65535'; continue; }
-                value=$((10#$value)); port_conflict "$value" "$tag" && { fail "TCP 端口 $value 已被占用"; continue; }
+                value=$((10#$value))
+                if (( value != port )) && port_conflict "$value" "$tag"; then
+                    fail "TCP 端口 $value 已被占用"
+                    continue
+                fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$value" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 return 0
@@ -517,7 +536,7 @@ delete_node() {
     local index tag name answer new_config new_meta count
     choose_node index || return 1
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE"); name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
-    read_input answer "  确认删除节点 [$name]？(y/N): " || return 1
+    read_input answer "  确认删除节点 [$name]？(Y/N): " || return 1
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
     jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" > "$new_config" || return 1
@@ -529,7 +548,7 @@ delete_node() {
 clear_nodes() {
     local count answer new_config new_meta
     count=$(node_count); (( count > 0 )) || { warn '暂无节点'; return 0; }
-    read_input answer "  确认清空全部 $count 个节点？(y/N): " || return 1
+    read_input answer "  确认清空全部 $count 个节点？(Y/N): " || return 1
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
     jq '.inbounds=[]' "$CONFIG_FILE" > "$new_config" || return 1; jq '.nodes=[]' "$META_FILE" > "$new_meta" || return 1
@@ -538,7 +557,10 @@ clear_nodes() {
 
 start_service() {
     (( $(node_count) > 0 )) || { warn '暂无节点，无法启动 sing-box'; return 1; }
-    require_core || return 1; write_service_unit || return 1; svc_enable || { fail '设置开机自启失败'; return 1; }
+    require_core || return 1; write_service_unit || return 1
+    if ! svc_enabled; then
+        svc_enable || { fail '设置开机自启失败'; return 1; }
+    fi
     svc_active && { success 'sing-box 已在运行'; return 0; }
     svc_start && success 'sing-box 已启动，开机自启已开启' || { fail 'sing-box 启动失败，请查看日志'; return 1; }
 }
@@ -547,20 +569,20 @@ stop_service() {
     svc_disable >/dev/null 2>&1 || true
     success 'sing-box 已停止，开机自启已关闭'
 }
-restart_service() { (( $(node_count) > 0 )) || { warn '暂无节点，无法重启 sing-box'; return 1; }; require_core || return 1; write_service_unit && svc_enable && svc_restart && success 'sing-box 已重启' || { fail 'sing-box 重启失败'; return 1; }; }
-show_status() {
-    resolve_core >/dev/null 2>&1 || true
-    printf '\n'; info 'sing-box 运行状态'
-    if [[ ! -x "$SINGBOX_BIN" ]]; then printf '  服务状态: %s未安装%s\n' "$RED" "$NC";
-    elif svc_active; then printf '  服务状态: %s运行中%s\n' "$GREEN" "$NC";
-    else printf '  服务状态: %s已停止%s\n' "$YELLOW" "$NC"; fi
-    printf '  节点数量: %s\n  核心版本: %s\n' "$(node_count)" "$(core_version)"
+restart_service() {
+    (( $(node_count) > 0 )) || { warn '暂无节点，无法重启 sing-box'; return 1; }
+    require_core || return 1
+    write_service_unit || return 1
+    if ! svc_enabled; then
+        svc_enable || { fail '设置开机自启失败，未执行重启'; return 1; }
+    fi
+    svc_restart && success 'sing-box 已重启，开机自启已开启' || { fail 'sing-box 重启失败'; return 1; }
 }
 view_logs() {
     info '按 Ctrl+C 退出日志查看'
     if [[ "$INIT_SYSTEM" == systemd ]]; then
         trap '' INT
-        bash -c 'trap - INT; exec journalctl -u sing-box -n 100 -f --no-pager' &
+        bash -c 'trap - INT; exec journalctl -u sing-box -n 20 -f --no-pager' &
         local log_pid=$!
         wait "$log_pid"; local status=$?
         kill "$log_pid" >/dev/null 2>&1 || true
@@ -570,7 +592,7 @@ view_logs() {
     fi
     [[ -f "$LOG_FILE" ]] || { warn "日志文件不存在: $LOG_FILE"; return 1; }
     trap '' INT
-    bash -c 'trap - INT; exec tail -n 100 -f "$1"' _ "$LOG_FILE" &
+    bash -c 'trap - INT; exec tail -n 20 -f "$1"' _ "$LOG_FILE" &
     local log_pid=$!
     wait "$log_pid"; local status=$?
     kill "$log_pid" >/dev/null 2>&1 || true
@@ -581,6 +603,7 @@ view_logs() {
 
 update_script() (
     local temp first version old_hash new_hash target
+    info '正在检查管理脚本更新'
     temp=$(mktemp "${SINGBOX_DIR}/.script.XXXXXX") || exit 1
     trap 'rm -f "$temp"' EXIT INT TERM
     get_url "${SCRIPT_URL}?v=$$-$RANDOM" "$temp" || { fail '管理脚本下载失败'; exit 1; }
@@ -591,15 +614,19 @@ update_script() (
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { fail '新版脚本缺少有效版本号'; exit 1; }
     target="${SCRIPT_TARGET:-/usr/local/bin/s}"
     old_hash=$(sha256sum "$target" 2>/dev/null | awk '{print $1}' || true); new_hash=$(sha256sum "$temp" | awk '{print $1}')
-    [[ -n "$old_hash" && "$old_hash" == "$new_hash" ]] && { info '管理脚本已是最新版'; exit 0; }
+    [[ -n "$old_hash" && "$old_hash" == "$new_hash" ]] && { info "管理脚本已是最新版本 v$version"; exit 0; }
     chmod 755 "$temp" && mv -f "$temp" "$target" || { fail '管理脚本替换失败'; exit 1; }
     trap - EXIT INT TERM
     success "管理脚本已更新至 v$version"
 )
 
+update_management_script() {
+    update_script || { fail '管理脚本更新失败'; return 1; }
+}
+
 uninstall() {
     local answer
-    read_input answer '  确认卸载 sing-box、全部节点和管理脚本？(y/N): ' || return 1
+    read_input answer '  确认卸载 sing-box、全部节点和管理脚本？(Y/N): ' || return 1
     [[ "$answer" == [yY] ]] || return 1
     svc_stop >/dev/null 2>&1 || true; svc_disable >/dev/null 2>&1 || true
     rm -f -- "$SYSTEMD_UNIT" "$OPENRC_UNIT"
@@ -647,19 +674,18 @@ menu() {
         menu_row "  ${GREEN}[6]${BLUE}  启动 sing-box${NC}"
         menu_row "  ${GREEN}[7]${BLUE}  停止 sing-box${NC}"
         menu_row "  ${GREEN}[8]${BLUE}  重启 sing-box${NC}"
-        menu_row "  ${GREEN}[9]${BLUE}  查看运行状态${NC}"
-        menu_row "  ${GREEN}[10]${BLUE} 查看实时日志${NC}"
+        menu_row "  ${GREEN}[9]${BLUE}  查看实时日志${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${BLUE}更新与维护${NC}"
-        menu_row "  ${GREEN}[11]${BLUE} 安装/更新核心${NC}"
-        menu_row "  ${GREEN}[12]${BLUE} 更新管理脚本${NC}"
-        menu_row "  ${GREEN}[13]${BLUE} 检查配置${NC}"
-        menu_row "  ${GREEN}[14]${BLUE} 一键卸载${NC}"
+        menu_row "  ${GREEN}[10]${BLUE} 安装/更新核心${NC}"
+        menu_row "  ${GREEN}[11]${BLUE} 更新管理脚本${NC}"
+        menu_row "  ${GREEN}[12]${BLUE} 检查配置${NC}"
+        menu_row "  ${GREEN}[13]${BLUE} 一键卸载${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
         printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
         local status=0
-        read -r -p '  请输入选项 [0-14]: ' choice || status=$?
+        read -r -p '  请输入选项 [0-13]: ' choice || status=$?
         (( status == 130 )) && interrupt_exit
         (( status != 0 )) && return 0
         case "$choice" in
@@ -667,10 +693,11 @@ menu() {
             6) printf '\n'; info '启动 sing-box'; start_service ;;
             7) printf '\n'; info '停止 sing-box'; stop_service ;;
             8) printf '\n'; info '重启 sing-box'; restart_service ;;
-            9) show_status ;;
-            10) view_logs ;;
-            11) install_core latest ;; 12) update_script && exec bash "${SCRIPT_TARGET:-$0}" ;;
-            13) check_config ;; 14) uninstall && return 0 ;; 0) return 0 ;;
+            9) view_logs ;;
+            10) update_core ;;
+            11) update_management_script && exec bash "${SCRIPT_TARGET:-$0}" ;;
+            12) check_config ;;
+            13) uninstall && return 0 ;; 0) return 0 ;;
             *) fail '无效选项' ;;
         esac
         (( MENU_CANCELLED )) || pause_enter
@@ -689,8 +716,8 @@ main() {
     case "${1:-}" in
         --version|-v) printf 'singbox 管理脚本 v%s\n' "$SCRIPT_VERSION"; return 0 ;;
         --help|-h) printf '用法: s [--update|--update-script|--uninstall|--version]\n'; return 0 ;;
-        --update) install_core latest; return $? ;;
-        --update-script) update_script; return $? ;;
+        --update) update_core; return $? ;;
+        --update-script) update_management_script; return $? ;;
         --uninstall) uninstall; return $? ;;
         '') menu; return $? ;;
         *) fail "未知参数: $1"; return 1 ;;
