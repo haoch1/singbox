@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="0.3.2"
+SCRIPT_VERSION="0.3.3"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -548,7 +548,7 @@ add_node() {
     current_count=$(node_count); current_count=$((current_count + 1))
     if apply_transaction "$new_config" "$new_meta" "$current_count"; then
         success "节点 [$name] 添加成功"
-        printf '  VLESS 链接: %s\n' "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")"
+        printf '  %s节点链接: %s%s\n' "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
     else
         rm -f "$new_config" "$new_meta"; return 1
     fi
@@ -557,7 +557,7 @@ add_node() {
 print_nodes() {
     jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.port|tostring)] | @tsv' "$META_FILE" | \
         while IFS=$'\t' read -r index name port; do
-            printf '  %s[%s]%s %s (vless-reality) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$BLUE" "$port" "$NC"
+            printf '  %s[%s] %s (vless-reality) @ %s%s\n' "$BLUE" "$index" "$name" "$port" "$NC"
         done
 }
 
@@ -576,8 +576,8 @@ view_nodes() {
     printf '\n'; info "=== 当前节点信息（共 ${count} 个） ==="; printf '\n'
     (( count > 0 )) || { warn '暂无节点'; return 0; }
     while IFS=$'\t' read -r index name server port sni uuid public sid; do
-        printf '  %s[%s]%s %s%s%s (vless-reality) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
-        printf '  VLESS 链接: %s\n' "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")"
+        printf '  %s[%s] %s (vless-reality) @ %s%s\n' "$BLUE" "$index" "$name" "$port" "$NC"
+        printf '  %s节点链接: %s%s\n' "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
         printf '\n'
     done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,.value.server,(.value.port|tostring),.value.sni,.value.uuid,.value.public_key,.value.short_id] | @tsv' "$META_FILE")
 }
@@ -592,7 +592,7 @@ apply_node_update() {
     count=$(node_count)
     if apply_transaction "$new_config" "$new_meta" "$count"; then
         success "节点 [$name] 修改成功"
-        printf '  VLESS 链接: %s\n' "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")"
+        printf '  %s节点链接: %s%s\n' "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
     else rm -f "$new_config" "$new_meta"; return 1; fi
 }
 
