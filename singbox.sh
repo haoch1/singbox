@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="0.2.2"
+SCRIPT_VERSION="0.2.3"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -15,6 +15,7 @@ META_FILE="$SINGBOX_DIR/nodes.json"
 PID_FILE="${SINGBOX_PID_FILE:-/run/sing-box/sing-box.pid}"
 LOG_FILE="${SINGBOX_LOG_FILE:-/var/log/sing-box.log}"
 LOCK_FILE="${SINGBOX_LOCK_FILE:-/run/lock/singbox-manager.lock}"
+LOCK_PID_FILE="${SINGBOX_LOCK_PID_FILE:-/run/lock/singbox-manager.pid}"
 SYSTEMD_UNIT="/etc/systemd/system/sing-box.service"
 OPENRC_UNIT="/etc/init.d/sing-box"
 DEFAULT_PORT=8443
@@ -29,6 +30,65 @@ info() { printf '  %s[信息] %s%s\n' "$CYAN" "$*" "$NC"; }
 warn() { printf '  %s[注意] %s%s\n' "$YELLOW" "$*" "$NC"; }
 success() { printf '  %s[成功] %s%s\n' "$GREEN" "$*" "$NC"; }
 interrupt_exit() { printf '\n'; exit 130; }
+
+clear_terminal() {
+    [[ -t 1 ]] || return 0
+    command -v clear >/dev/null 2>&1 && clear 2>/dev/null || true
+    printf '\033[3J\033[2J\033[H\033[0m'
+}
+
+lock_fd_is_inherited() {
+    local fd_target lock_target
+    [[ -e "/proc/$$/fd/9" ]] || return 1
+    command -v readlink >/dev/null 2>&1 || return 1
+    fd_target=$(readlink -f "/proc/$$/fd/9" 2>/dev/null || true)
+    lock_target=$(readlink -f "$LOCK_FILE" 2>/dev/null || true)
+    [[ -n "$fd_target" && -n "$lock_target" && "$fd_target" == "$lock_target" ]]
+}
+
+lock_owner_pid() {
+    local owner=''
+    [[ -r "$LOCK_PID_FILE" ]] && owner=$(cat "$LOCK_PID_FILE" 2>/dev/null || true)
+    printf '%s' "$owner"
+}
+
+cleanup_lock() {
+    local owner; owner=$(lock_owner_pid)
+    [[ "$owner" == "$$" ]] && rm -f -- "$LOCK_PID_FILE"
+    exec 9>&- 2>/dev/null || true
+}
+
+acquire_manager_lock() {
+    local owner
+    mkdir -p "$(dirname "$LOCK_FILE")" || { fail '无法创建管理锁目录'; return 1; }
+    if lock_fd_is_inherited; then
+        printf '%s\n' "$$" > "$LOCK_PID_FILE" || { fail '无法写入管理锁 PID'; return 1; }
+        trap cleanup_lock EXIT
+        return 0
+    fi
+    exec 9>"$LOCK_FILE" || { fail '无法打开管理锁'; return 1; }
+    if ! flock -n 9; then
+        owner=$(lock_owner_pid)
+        if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+            exec 9>&-
+            exec 9>"$LOCK_FILE" || { fail '无法重新打开管理锁'; return 1; }
+            flock -n 9 || {
+                owner=$(lock_owner_pid)
+                fail '已有 sing-box 管理脚本实例正在运行'
+                info "当前实例 PID: ${owner:-未知}"
+                exec 9>&-
+                return 1
+            }
+        else
+            fail '已有 sing-box 管理脚本实例正在运行'
+            info "当前实例 PID: ${owner:-未知}"
+            exec 9>&-
+            return 1
+        fi
+    fi
+    printf '%s\n' "$$" > "$LOCK_PID_FILE" || { exec 9>&-; fail '无法写入管理锁 PID'; return 1; }
+    trap cleanup_lock EXIT
+}
 
 read_input() {
     local dest="$1" prompt="$2" value='' status=0
@@ -258,7 +318,7 @@ build_link() {
 check_config() {
     local mode="${1:-verbose}"
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 或 s --update'; return 1; }
+    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 安装/更新 sing-box内核 或 s --update'; return 1; }
     [[ "$mode" == quiet ]] || info '正在检查 config.json'
     local result
     if result=$("$SINGBOX_BIN" check -c "$CONFIG_FILE" 2>&1); then
@@ -361,7 +421,7 @@ update_core() {
 
 require_core() {
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 或 s --update'; return 1; }
+    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 安装/更新 sing-box内核 或 s --update'; return 1; }
 }
 
 add_node() {
@@ -626,7 +686,7 @@ uninstall() {
         systemctl reset-failed sing-box.service >/dev/null 2>&1 || true
     fi
     rm -rf "$SINGBOX_DIR" "$PID_FILE" "$LOG_FILE" "$SINGBOX_BIN"
-    rm -f -- "${SCRIPT_TARGET:-/usr/local/bin/s}" "$LOCK_FILE"
+    rm -f -- "${SCRIPT_TARGET:-/usr/local/bin/s}" "$LOCK_FILE" "$LOCK_PID_FILE"
     rmdir "$(dirname "$PID_FILE")" >/dev/null 2>&1 || true
     success 'sing-box 已卸载'
 }
@@ -644,7 +704,7 @@ menu() {
     while true; do
         MENU_CANCELLED=0
         INPUT_EOF=0
-        [[ -t 1 ]] && printf '\033[2J\033[H'
+        clear_terminal
         count=$(node_count) || return 1
         core=$(core_version)
         if [[ ! -x "$SINGBOX_BIN" ]]; then state='未安装'; elif svc_active; then state='运行中'; else state='已停止'; fi
@@ -668,7 +728,7 @@ menu() {
         menu_row "  ${GREEN}[9]${BLUE}  查看实时日志${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${BLUE}更新与维护${NC}"
-        menu_row "  ${GREEN}[10]${BLUE} 安装/更新核心${NC}"
+        menu_row "  ${GREEN}[10]${BLUE} 安装/更新 sing-box内核${NC}"
         menu_row "  ${GREEN}[11]${BLUE} 更新管理脚本${NC}"
         menu_row "  ${GREEN}[12]${BLUE} 检查配置${NC}"
         menu_row "  ${GREEN}[13]${BLUE} 一键卸载${NC}"
@@ -699,8 +759,7 @@ menu() {
 main() {
     [[ "$(uname -s)" == Linux && "$EUID" == 0 ]] || { fail '请在 Linux VPS/容器中以 root 或 sudo 运行'; return 1; }
     detect_init; ensure_dependencies || return 1; mkdir -p /run/lock || return 1; mkdir -p "$SINGBOX_DIR" || return 1
-    exec 9>"$LOCK_FILE" || { fail '无法打开管理锁'; return 1; }
-    flock -n 9 || { fail '已有 sing-box 管理脚本实例正在运行'; return 1; }
+    acquire_manager_lock || return 1
     init_state || return 1
     resolve_core >/dev/null 2>&1 || true
     SCRIPT_TARGET="${SCRIPT_TARGET:-/usr/local/bin/s}"
