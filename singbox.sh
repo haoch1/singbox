@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.4"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -105,8 +105,27 @@ lock_fd_is_inherited() {
 }
 
 lock_owner_pid() {
-    local owner=''
+    local owner='' lock_target='' fd pid fd_target
     [[ -r "$LOCK_PID_FILE" ]] && owner=$(cat "$LOCK_PID_FILE" 2>/dev/null || true)
+    lock_target=$(readlink -f "$LOCK_FILE" 2>/dev/null || true)
+    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
+        fd_target=$(readlink -f "/proc/$owner/fd/9" 2>/dev/null || true)
+        if [[ -z "$lock_target" || "$fd_target" == "$lock_target" ]]; then
+            printf '%s' "$owner"
+            return 0
+        fi
+    fi
+    [[ -n "$lock_target" ]] || { printf '%s' "$owner"; return 0; }
+    for fd in /proc/[0-9]*/fd/9; do
+        [[ -e "$fd" ]] || continue
+        pid=${fd#/proc/}; pid=${pid%%/*}
+        [[ "$pid" == "$$" ]] && continue
+        fd_target=$(readlink -f "$fd" 2>/dev/null || true)
+        if [[ -n "$fd_target" && "$fd_target" == "$lock_target" ]]; then
+            printf '%s' "$pid"
+            return 0
+        fi
+    done
     printf '%s' "$owner"
 }
 
@@ -200,39 +219,39 @@ detect_init() {
 
 svc_active() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl is-active --quiet sing-box ;;
-        openrc) rc-service sing-box status >/dev/null 2>&1 ;;
+        systemd) systemctl is-active --quiet sing-box 9>&- ;;
+        openrc) rc-service sing-box status >/dev/null 2>&1 9>&- ;;
         direct)
             [[ -s "$PID_FILE" ]] || return 1
             local pid; pid=$(cat "$PID_FILE" 2>/dev/null || true)
             [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
-            [[ -r "/proc/$pid/cmdline" ]] && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -Fq "$SINGBOX_BIN"
+            [[ -r "/proc/$pid/cmdline" ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 9>&- | grep -Fq "$SINGBOX_BIN" 9>&-
             ;;
     esac
 }
 
 svc_enabled() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl is-enabled --quiet sing-box ;;
-        openrc) rc-update show default 2>/dev/null | grep -Eq '(^|[[:space:]])sing-box([[:space:]]|$)' ;;
+        systemd) systemctl is-enabled --quiet sing-box 9>&- ;;
+        openrc) rc-update show default 2>/dev/null 9>&- | grep -Eq '(^|[[:space:]])sing-box([[:space:]]|$)' 9>&- ;;
         direct) return 1 ;;
     esac
 }
 
-svc_reload() { [[ "$INIT_SYSTEM" == systemd ]] && systemctl daemon-reload >/dev/null 2>&1 || true; }
+svc_reload() { [[ "$INIT_SYSTEM" == systemd ]] && systemctl daemon-reload >/dev/null 2>&1 9>&- || true; }
 
 svc_enable() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl enable sing-box >/dev/null 2>&1 ;;
-        openrc) rc-update add sing-box default >/dev/null 2>&1 ;;
+        systemd) systemctl enable sing-box >/dev/null 2>&1 9>&- ;;
+        openrc) rc-update add sing-box default >/dev/null 2>&1 9>&- ;;
         direct) return 0 ;;
     esac
 }
 
 svc_disable() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl disable sing-box >/dev/null 2>&1 ;;
-        openrc) rc-update del sing-box default >/dev/null 2>&1 ;;
+        systemd) systemctl disable sing-box >/dev/null 2>&1 9>&- ;;
+        openrc) rc-update del sing-box default >/dev/null 2>&1 9>&- ;;
         direct) return 0 ;;
     esac
 }
@@ -240,16 +259,16 @@ svc_disable() {
 svc_start() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
-        systemd) systemctl start sing-box >/dev/null 2>&1 ;;
+        systemd) systemctl start sing-box >/dev/null 2>&1 9>&- ;;
         openrc)
-            rc-service sing-box start >/dev/null 2>&1 || return 1
+            rc-service sing-box start >/dev/null 2>&1 9>&- || return 1
             svc_active
             ;;
         direct)
             mkdir -p "$(dirname "$PID_FILE")" || return 1
             mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
             rm -f "$PID_FILE"
-            nohup "$SINGBOX_BIN" run -c "$CONFIG_FILE" >>"$LOG_FILE" 2>&1 </dev/null &
+            nohup "$SINGBOX_BIN" run -c "$CONFIG_FILE" >>"$LOG_FILE" 2>&1 </dev/null 9>&- &
             printf '%s\n' "$!" > "$PID_FILE"
             sleep 1
             svc_active
@@ -259,8 +278,8 @@ svc_start() {
 
 svc_stop() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl stop sing-box >/dev/null 2>&1 ;;
-        openrc) rc-service sing-box stop >/dev/null 2>&1 ;;
+        systemd) systemctl stop sing-box >/dev/null 2>&1 9>&- ;;
+        openrc) rc-service sing-box stop >/dev/null 2>&1 9>&- ;;
         direct)
             local pid=''
             [[ -s "$PID_FILE" ]] && pid=$(cat "$PID_FILE" 2>/dev/null || true)
@@ -273,9 +292,9 @@ svc_stop() {
 svc_restart() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
-        systemd) systemctl restart sing-box >/dev/null 2>&1 ;;
+        systemd) systemctl restart sing-box >/dev/null 2>&1 9>&- ;;
         openrc)
-            rc-service sing-box restart >/dev/null 2>&1 || return 1
+            rc-service sing-box restart >/dev/null 2>&1 9>&- || return 1
             svc_active
             ;;
         direct) svc_stop; sleep 1; svc_start ;;
@@ -536,7 +555,7 @@ install_realm_script() {
 
 open_realm() {
     install_realm_script || return 1
-    "$REALM_SCRIPT_TARGET"
+    "$REALM_SCRIPT_TARGET" 9>&-
 }
 
 realm_artifacts_exist() {
@@ -545,16 +564,16 @@ realm_artifacts_exist() {
 
 stop_realm_service_fallback() {
     if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
-        systemctl is-active --quiet realm && systemctl stop realm >/dev/null 2>&1 || true
-        if systemctl is-enabled --quiet realm; then
-            systemctl disable realm >/dev/null 2>&1 || { fail 'Realm 取消开机自启失败'; return 1; }
+        systemctl is-active --quiet realm 9>&- && systemctl stop realm >/dev/null 2>&1 9>&- || true
+        if systemctl is-enabled --quiet realm 9>&-; then
+            systemctl disable realm >/dev/null 2>&1 9>&- || { fail 'Realm 取消开机自启失败'; return 1; }
         fi
-        systemctl reset-failed realm.service >/dev/null 2>&1 || true
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl reset-failed realm.service >/dev/null 2>&1 9>&- || true
+        systemctl daemon-reload >/dev/null 2>&1 9>&- || true
     elif command -v rc-service >/dev/null 2>&1; then
-        rc-service realm stop >/dev/null 2>&1 || true
+        rc-service realm stop >/dev/null 2>&1 9>&- || true
         if command -v rc-update >/dev/null 2>&1; then
-            rc-update del realm default >/dev/null 2>&1 || true
+            rc-update del realm default >/dev/null 2>&1 9>&- || true
         fi
     fi
 }
@@ -569,7 +588,7 @@ remove_realm_files() {
 uninstall_realm() {
     if [[ -x "$REALM_SCRIPT_TARGET" ]]; then
         info '正在卸载 Realm 端口转发'
-        if ! printf 'Y\n' | "$REALM_SCRIPT_TARGET" --uninstall; then
+        if ! printf 'Y\n' | "$REALM_SCRIPT_TARGET" --uninstall 9>&-; then
             fail 'Realm 卸载失败，未继续删除 sing-box'
             return 1
         fi
@@ -919,8 +938,8 @@ uninstall() {
     svc_stop >/dev/null 2>&1 || true; svc_disable >/dev/null 2>&1 || true
     rm -f -- "$SYSTEMD_UNIT" "$SYSTEMD_STARTUP" "$OPENRC_UNIT" "$OPENRC_STARTUP"
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl reset-failed sing-box.service >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1 9>&- || true
+        systemctl reset-failed sing-box.service >/dev/null 2>&1 9>&- || true
     fi
     rm -rf "$SINGBOX_DIR" "$PID_FILE" "$LOG_FILE" "$LOG_FILE".*
     [[ "$SINGBOX_BIN" == "$CORE_INSTALL_BIN" ]] && rm -f -- "$CORE_INSTALL_BIN"
