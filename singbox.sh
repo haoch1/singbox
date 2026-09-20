@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -334,7 +334,9 @@ resolve_core() {
 core_version() {
     resolve_core >/dev/null 2>&1 || true
     [[ -x "$SINGBOX_BIN" ]] || { printf '未安装'; return; }
-    local v; v=$("$SINGBOX_BIN" version 2>/dev/null | sed -n 's/^sing-box version \([^[:space:]]*\).*/\1/p' | head -n 1)
+    local output v
+    output=$("$SINGBOX_BIN" version 2>/dev/null || true)
+    v=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
     [[ -n "$v" ]] && printf 'v%s' "$v" || printf '未知'
 }
 
@@ -428,7 +430,7 @@ apply_transaction() {
 }
 
 install_core() (
-    local requested="${1:-latest}" temp version arch asset_name asset_url digest binary member current installed=''
+    local requested="${1:-latest}" temp version arch libc asset_name asset_url digest binary member current installed='' output
     resolve_core >/dev/null 2>&1 || true
     info '正在检查 sing-box 核心更新'
     temp=$(mktemp -d "$SINGBOX_DIR/.core.XXXXXX") || exit 1
@@ -437,7 +439,8 @@ install_core() (
     version=$(jq -er '.tag_name | sub("^v"; "") | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$temp/release.json") || { fail '官方版本信息无效'; exit 1; }
     [[ "$requested" == latest || "$requested" == "$version" ]] || { fail "固定版本不匹配: $requested"; exit 1; }
     if [[ -x "$SINGBOX_BIN" ]]; then
-        installed=$("$SINGBOX_BIN" version 2>/dev/null | sed -n 's/^sing-box version \([^[:space:]]*\).*/\1/p' | head -n 1)
+        output=$("$SINGBOX_BIN" version 2>/dev/null || true)
+        installed=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
         if [[ "$requested" == latest && "$installed" == "$version" ]]; then
             info "sing-box 核心已是最新版本 v$version"
             exit 0
@@ -449,7 +452,22 @@ install_core() (
         armv7l|armv7) arch=armv7 ;;
         *) fail "暂不支持架构: $(uname -m)"; exit 1 ;;
     esac
-    asset_name=$(jq -er --arg v "$version" --arg a "$arch" '.assets[] | select(.name | test("^sing-box-" + $v + "-linux-" + $a + "(-musl)?\\.tar\\.gz$")) | .name' "$temp/release.json" | head -n 1) || { fail '找不到对应架构安装包'; exit 1; }
+    output=$(ldd --version 2>&1 || true)
+    if [[ "$output" == *musl* || "$output" == *Musl* ]]; then
+        libc=musl
+    else
+        libc=glibc
+    fi
+    if [[ "$libc" == musl ]]; then
+        asset_name=$(jq -er --arg v "$version" --arg a "$arch" '
+            [.assets[] | .name | select(. == ("sing-box-" + $v + "-linux-" + $a + "-musl.tar.gz"))][0]
+            // error("对应架构的 musl 安装包不存在")' "$temp/release.json") || { fail '找不到对应架构安装包'; exit 1; }
+    else
+        asset_name=$(jq -er --arg v "$version" --arg a "$arch" '
+            ([.assets[] | .name | select(. == ("sing-box-" + $v + "-linux-" + $a + "-glibc.tar.gz"))][0]
+             // [.assets[] | .name | select(. == ("sing-box-" + $v + "-linux-" + $a + ".tar.gz"))][0]
+             // error("对应架构的 glibc 安装包不存在"))' "$temp/release.json") || { fail '找不到对应架构安装包'; exit 1; }
+    fi
     asset_url=$(jq -er --arg n "$asset_name" '.assets[] | select(.name == $n) | .browser_download_url' "$temp/release.json") || exit 1
     digest=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .digest // empty' "$temp/release.json")
     get_url "$asset_url" "$temp/package.tar.gz" || { fail '核心下载失败'; exit 1; }
@@ -463,7 +481,8 @@ install_core() (
     binary="$temp/sing-box"
     tar -xOzf "$temp/package.tar.gz" -- "$member" > "$binary" || exit 1
     chmod 755 "$binary"
-    current=$("$binary" version 2>/dev/null | sed -n 's/^sing-box version \([^[:space:]]*\).*/\1/p' | head -n 1)
+    output=$("$binary" version 2>/dev/null || true)
+    current=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
     [[ "$current" == "$version" ]] || { fail "核心版本不匹配: $current"; exit 1; }
     if [[ -x "$SINGBOX_BIN" ]]; then cp -p "$SINGBOX_BIN" "$temp/old" || exit 1; fi
     mkdir -p "${SINGBOX_BIN%/*}" || exit 1
@@ -872,7 +891,7 @@ update_script() (
     IFS= read -r first < "$temp" || true
     [[ "$first" == '#!/usr/bin/env bash' || "$first" == '#!/bin/bash' ]] || { fail '下载内容不是有效 Bash 脚本'; exit 1; }
     bash -n "$temp" || { fail '新版管理脚本语法检查失败'; exit 1; }
-    version=$(sed -n 's/^SCRIPT_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$temp" | head -n 1)
+    version=$(awk -F'"' '/^SCRIPT_VERSION=/{print $2; exit}' "$temp")
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { fail '新版脚本缺少有效版本号'; exit 1; }
     target="${SCRIPT_TARGET:-/usr/local/bin/s}"
     old_hash=$(sha256sum "$target" 2>/dev/null | awk '{print $1}' || true); new_hash=$(sha256sum "$temp" | awk '{print $1}')
