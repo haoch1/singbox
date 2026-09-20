@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="0.3.1"
+SCRIPT_VERSION="0.3.2"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -322,8 +322,8 @@ generate_credentials() {
 build_link() {
     local server="$1" port="$2" uuid="$3" sni="$4" public="$5" sid="$6" name="$7"
     local host; host=$(format_server_for_uri "$server")
-    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&flow=xtls-rprx-vision#%s' \
-        "$uuid" "$host" "$port" "$(uri_escape "$sni")" "$(uri_escape "$public")" "$sid" "$(uri_escape "$name")"
+    printf 'vless://%s@%s:%s?security=reality&encryption=none&pbk=%s&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=%s&sid=%s#%s' \
+        "$uuid" "$host" "$port" "$(uri_escape "$public")" "$(uri_escape "$sni")" "$sid" "$(uri_escape "$name")"
 }
 
 check_config() {
