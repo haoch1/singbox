@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="0.2.1"
+SCRIPT_VERSION="0.2.2"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -414,7 +414,6 @@ print_nodes() {
     jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.port|tostring)] | @tsv' "$META_FILE" | \
         while IFS=$'\t' read -r index name port; do
             printf '  %s[%s]%s %s (vless-reality) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$BLUE" "$port" "$NC"
-            printf '\n'
         done
 }
 
