@@ -5,11 +5,20 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="0.2.3"
+SCRIPT_VERSION="0.3.0"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
 CORE_INSTALL_BIN="/usr/local/bin/sing-box"
+REALM_SCRIPT_TARGET="/usr/local/bin/r"
+REALM_SCRIPT_URL="https://raw.githubusercontent.com/haoch1/realm/main/realm.sh"
+REALM_DIR="/root/realm"
+REALM_UNIT="/etc/systemd/system/realm.service"
+REALM_SYSTEMD_STARTUP="/etc/systemd/system/multi-user.target.wants/realm.service"
+REALM_OPENRC_UNIT="/etc/init.d/realm"
+REALM_RUNLEVEL="/etc/runlevels/default/realm"
+REALM_LOG="/var/log/realm.log"
+REALM_LOCK="/run/lock/realm-manager.lock"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
 META_FILE="$SINGBOX_DIR/nodes.json"
 PID_FILE="${SINGBOX_PID_FILE:-/run/sing-box/sing-box.pid}"
@@ -17,7 +26,9 @@ LOG_FILE="${SINGBOX_LOG_FILE:-/var/log/sing-box.log}"
 LOCK_FILE="${SINGBOX_LOCK_FILE:-/run/lock/singbox-manager.lock}"
 LOCK_PID_FILE="${SINGBOX_LOCK_PID_FILE:-/run/lock/singbox-manager.pid}"
 SYSTEMD_UNIT="/etc/systemd/system/sing-box.service"
+SYSTEMD_STARTUP="/etc/systemd/system/multi-user.target.wants/sing-box.service"
 OPENRC_UNIT="/etc/init.d/sing-box"
+OPENRC_STARTUP="/etc/runlevels/default/sing-box"
 DEFAULT_PORT=8443
 DEFAULT_SNI="www.bing.com"
 INIT_SYSTEM="direct"
@@ -318,7 +329,7 @@ build_link() {
 check_config() {
     local mode="${1:-verbose}"
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 安装/更新 sing-box内核 或 s --update'; return 1; }
+    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 或 s --update'; return 1; }
     [[ "$mode" == quiet ]] || info '正在检查 config.json'
     local result
     if result=$("$SINGBOX_BIN" check -c "$CONFIG_FILE" 2>&1); then
@@ -421,7 +432,80 @@ update_core() {
 
 require_core() {
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 安装/更新 sing-box内核 或 s --update'; return 1; }
+    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [10] 或 s --update'; return 1; }
+}
+
+install_realm_script() {
+    local temp first
+    [[ -x "$REALM_SCRIPT_TARGET" ]] && return 0
+    info '正在安装端口转发脚本'
+    temp=$(mktemp "$SINGBOX_DIR/.realm-script.XXXXXX") || { fail '端口转发脚本临时文件创建失败'; return 1; }
+    if ! get_url "${REALM_SCRIPT_URL}?v=$$-$RANDOM" "$temp"; then
+        rm -f -- "$temp"
+        fail '端口转发脚本下载失败'
+        return 1
+    fi
+    IFS= read -r first < "$temp" || true
+    if [[ "$first" != '#!/bin/sh' ]] || ! bash -n "$temp"; then
+        rm -f -- "$temp"
+        fail '下载内容不是有效的 Realm 管理脚本'
+        return 1
+    fi
+    chmod 755 "$temp" && mv -f "$temp" "$REALM_SCRIPT_TARGET" || {
+        rm -f -- "$temp"
+        fail '端口转发脚本安装失败'
+        return 1
+    }
+    success '端口转发脚本安装成功'
+}
+
+open_realm() {
+    install_realm_script || return 1
+    "$REALM_SCRIPT_TARGET"
+}
+
+realm_artifacts_exist() {
+    [[ -e "$REALM_SCRIPT_TARGET" || -e "$REALM_DIR" || -e "$REALM_UNIT" || -e "$REALM_UNIT.bak" || -e "$REALM_SYSTEMD_STARTUP" || -L "$REALM_SYSTEMD_STARTUP" || -e "$REALM_OPENRC_UNIT" || -e "$REALM_LOG" || -e "$REALM_LOCK" || -e "$REALM_RUNLEVEL" ]] || compgen -G '/var/log/realm.log.*' >/dev/null 2>&1 || compgen -G '/usr/local/bin/.realm-manager.??????' >/dev/null 2>&1
+}
+
+stop_realm_service_fallback() {
+    if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet realm && systemctl stop realm >/dev/null 2>&1 || true
+        if systemctl is-enabled --quiet realm; then
+            systemctl disable realm >/dev/null 2>&1 || { fail 'Realm 取消开机自启失败'; return 1; }
+        fi
+        systemctl reset-failed realm.service >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    elif command -v rc-service >/dev/null 2>&1; then
+        rc-service realm stop >/dev/null 2>&1 || true
+        if command -v rc-update >/dev/null 2>&1; then
+            rc-update del realm default >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+remove_realm_files() {
+    rm -f -- "$REALM_UNIT" "$REALM_UNIT.bak" "$REALM_SYSTEMD_STARTUP" "$REALM_RUNLEVEL" "$REALM_OPENRC_UNIT" \
+        "$REALM_SCRIPT_TARGET" "$REALM_LOG" "$REALM_LOG".* "$REALM_LOCK" \
+        /usr/local/bin/.realm-manager.??????
+    rm -rf -- "$REALM_DIR"
+}
+
+uninstall_realm() {
+    if [[ -x "$REALM_SCRIPT_TARGET" ]]; then
+        info '正在卸载 Realm 端口转发'
+        if ! printf 'Y\n' | "$REALM_SCRIPT_TARGET" --uninstall; then
+            fail 'Realm 卸载失败，未继续删除 sing-box'
+            return 1
+        fi
+    elif realm_artifacts_exist; then
+        info '正在清理残留 Realm 文件'
+        stop_realm_service_fallback || return 1
+    else
+        return 0
+    fi
+    remove_realm_files || { fail 'Realm 相关文件清理失败'; return 1; }
+    success 'Realm 及其相关文件已清理'
 }
 
 add_node() {
@@ -677,18 +761,20 @@ update_management_script() {
 
 uninstall() {
     local answer
-    read_input answer '  确认卸载 sing-box、全部节点和管理脚本？(Y/N): ' || return 1
+    read_input answer '  确认卸载 sing-box、Realm、全部节点、端口转发规则和管理脚本？(Y/N): ' || return 1
     [[ "$answer" == [yY] ]] || return 1
+    uninstall_realm || return 1
     svc_stop >/dev/null 2>&1 || true; svc_disable >/dev/null 2>&1 || true
-    rm -f -- "$SYSTEMD_UNIT" "$OPENRC_UNIT"
+    rm -f -- "$SYSTEMD_UNIT" "$SYSTEMD_STARTUP" "$OPENRC_UNIT" "$OPENRC_STARTUP"
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload >/dev/null 2>&1 || true
         systemctl reset-failed sing-box.service >/dev/null 2>&1 || true
     fi
-    rm -rf "$SINGBOX_DIR" "$PID_FILE" "$LOG_FILE" "$SINGBOX_BIN"
+    rm -rf "$SINGBOX_DIR" "$PID_FILE" "$LOG_FILE" "$LOG_FILE".*
+    [[ "$SINGBOX_BIN" == "$CORE_INSTALL_BIN" ]] && rm -f -- "$CORE_INSTALL_BIN"
     rm -f -- "${SCRIPT_TARGET:-/usr/local/bin/s}" "$LOCK_FILE" "$LOCK_PID_FILE"
     rmdir "$(dirname "$PID_FILE")" >/dev/null 2>&1 || true
-    success 'sing-box 已卸载'
+    success 'sing-box、Realm 及其相关文件已卸载'
 }
 
 menu_row() {
@@ -720,35 +806,43 @@ menu() {
         menu_row "  ${GREEN}[3]${BLUE}  修改节点${NC}"
         menu_row "  ${GREEN}[4]${BLUE}  删除节点${NC}"
         menu_row "  ${GREEN}[5]${BLUE}  清空所有节点${NC}"
+        menu_row "  ${GREEN}[6]${BLUE}  端口转发${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${BLUE}服务管理${NC}"
-        menu_row "  ${GREEN}[6]${BLUE}  启动 sing-box${NC}"
-        menu_row "  ${GREEN}[7]${BLUE}  停止 sing-box${NC}"
-        menu_row "  ${GREEN}[8]${BLUE}  重启 sing-box${NC}"
-        menu_row "  ${GREEN}[9]${BLUE}  查看实时日志${NC}"
+        menu_row "  ${GREEN}[7]${BLUE}  启动 sing-box${NC}"
+        menu_row "  ${GREEN}[8]${BLUE}  停止 sing-box${NC}"
+        menu_row "  ${GREEN}[9]${BLUE}  重启 sing-box${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${BLUE}更新与维护${NC}"
-        menu_row "  ${GREEN}[10]${BLUE} 安装/更新 sing-box内核${NC}"
+        menu_row "  ${GREEN}[10]${BLUE} 安装/更新核心${NC}"
         menu_row "  ${GREEN}[11]${BLUE} 更新管理脚本${NC}"
-        menu_row "  ${GREEN}[12]${BLUE} 检查配置${NC}"
-        menu_row "  ${GREEN}[13]${BLUE} 一键卸载${NC}"
+        menu_row "  ${GREEN}[12]${BLUE} 查看实时日志${NC}"
+        menu_row "  ${GREEN}[13]${BLUE} 检查配置${NC}"
+        menu_row "  ${GREEN}[14]${BLUE} 一键卸载${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
         printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
         local status=0
-        read -r -p '  请输入选项 [0-13]: ' choice || status=$?
+        read -r -p '  请输入选项 [0-14]: ' choice || status=$?
         (( status == 130 )) && interrupt_exit
         (( status != 0 )) && return 0
         case "$choice" in
             1) add_node ;; 2) view_nodes ;; 3) modify_node ;; 4) delete_node ;; 5) clear_nodes ;;
-            6) printf '\n'; info '启动 sing-box'; start_service ;;
-            7) printf '\n'; info '停止 sing-box'; stop_service ;;
-            8) printf '\n'; info '重启 sing-box'; restart_service ;;
-            9) view_logs ;;
+            6) open_realm ;;
+            7) printf '\n'; info '启动 sing-box'; start_service ;;
+            8) printf '\n'; info '停止 sing-box'; stop_service ;;
+            9) printf '\n'; info '重启 sing-box'; restart_service ;;
             10) update_core ;;
-            11) update_management_script && exec bash "${SCRIPT_TARGET:-$0}" ;;
-            12) check_config ;;
-            13) uninstall && return 0 ;; 0) return 0 ;;
+            11)
+                if update_management_script; then
+                    pause_enter '  按回车加载最新脚本...'
+                    (( INPUT_EOF )) && return 0
+                    exec bash "${SCRIPT_TARGET:-$0}"
+                fi
+                ;;
+            12) view_logs ;;
+            13) check_config ;;
+            14) uninstall && return 0 ;; 0) return 0 ;;
             *) fail '无效选项' ;;
         esac
         (( MENU_CANCELLED )) || pause_enter
