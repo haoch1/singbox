@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.0.4"
+SCRIPT_VERSION="1.0.5"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -948,10 +948,47 @@ uninstall() {
     success 'sing-box、Realm 及其相关文件已卸载'
 }
 
+display_width() {
+    printf '%s' "$1" | LC_ALL=C awk '
+        BEGIN { for (i = 0; i < 256; i++) ord[sprintf("%c", i)] = i }
+        {
+            width = 0
+            bytes = length($0)
+            for (i = 1; i <= bytes; i++) {
+                code = ord[substr($0, i, 1)]
+                if (code < 128) { width += 1; continue }
+                if (code >= 192 && code < 224) { i += 1; width += 1; continue }
+                if (code >= 224 && code < 240) {
+                    unicode = (code - 224) * 4096 \
+                        + (ord[substr($0, i + 1, 1)] - 128) * 64 \
+                        + (ord[substr($0, i + 2, 1)] - 128)
+                    if ((unicode >= 4352 && unicode <= 4447) ||
+                        (unicode >= 11904 && unicode <= 12351) ||
+                        (unicode >= 12352 && unicode <= 13311) ||
+                        (unicode >= 13312 && unicode <= 19903) ||
+                        (unicode >= 19968 && unicode <= 40959) ||
+                        (unicode >= 40960 && unicode <= 42191) ||
+                        (unicode >= 44032 && unicode <= 55203) ||
+                        (unicode >= 63744 && unicode <= 64255) ||
+                        (unicode >= 65040 && unicode <= 65103) ||
+                        (unicode >= 65280 && unicode <= 65376) ||
+                        (unicode >= 65504 && unicode <= 65510)) width += 2
+                    else width += 1
+                    i += 2
+                    continue
+                }
+                if (code >= 240) { i += 3; width += 2; continue }
+                width += 1
+            }
+            printf "%d", width
+        }'
+}
+
 menu_row() {
     local text="$1" plain width pad
     plain=$(printf '%s' "$text" | sed $'s/\033\\[[0-9;]*m//g')
-    width=$(printf '%s' "$plain" | wc -L)
+    width=$(display_width "$plain")
+    [[ "$width" =~ ^[0-9]+$ ]] || width=0
     pad=$((39-width)); (( pad > 0 )) || pad=0
     printf '  %s║%s%*s%s║%s\n' "$BLUE" "$text" "$pad" '' "$BLUE" "$NC"
 }
