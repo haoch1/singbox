@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.2.1"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -580,24 +580,16 @@ restart_service() {
 }
 view_logs() {
     info '按 Ctrl+C 退出日志查看'
+    local status=0
+    trap 'MENU_CANCELLED=1' INT
     if [[ "$INIT_SYSTEM" == systemd ]]; then
-        trap '' INT
-        bash -c 'trap - INT; exec journalctl -u sing-box -n 20 -f --no-pager' &
-        local log_pid=$!
-        wait "$log_pid"; local status=$?
-        kill "$log_pid" >/dev/null 2>&1 || true
-        trap interrupt_exit INT
-        (( status == 130 || status == 143 )) && { MENU_CANCELLED=1; return 0; }
-        return "$status"
+        journalctl -u sing-box -n 20 -f --no-pager || status=$?
+    else
+        [[ -f "$LOG_FILE" ]] || { trap interrupt_exit INT; warn "日志文件不存在: $LOG_FILE"; return 1; }
+        tail -n 20 -f "$LOG_FILE" || status=$?
     fi
-    [[ -f "$LOG_FILE" ]] || { warn "日志文件不存在: $LOG_FILE"; return 1; }
-    trap '' INT
-    bash -c 'trap - INT; exec tail -n 20 -f "$1"' _ "$LOG_FILE" &
-    local log_pid=$!
-    wait "$log_pid"; local status=$?
-    kill "$log_pid" >/dev/null 2>&1 || true
     trap interrupt_exit INT
-    (( status == 130 || status == 143 )) && { MENU_CANCELLED=1; return 0; }
+    (( MENU_CANCELLED || status == 130 || status == 143 )) && { MENU_CANCELLED=1; return 0; }
     return "$status"
 }
 
