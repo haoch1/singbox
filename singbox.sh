@@ -149,12 +149,12 @@ acquire_manager_lock() {
 }
 
 read_input() {
-    local dest="$1" prompt="$2" value='' status=0
-    read -r -p "$prompt" value || status=$?
+    local dest="$1" prompt="$2" input_value='' status=0
+    read -r -p "$prompt" input_value || status=$?
     (( status == 130 )) && return 130
     (( status != 0 )) && { INPUT_EOF=1; return "$status"; }
-    [[ "$value" == [qQ] ]] && { MENU_CANCELLED=1; return 1; }
-    printf -v "$dest" '%s' "$value"
+    [[ "$input_value" == [qQ] ]] && { MENU_CANCELLED=1; return 1; }
+    printf -v "$dest" '%s' "$input_value"
 }
 
 pause_enter() {
@@ -598,7 +598,7 @@ add_node() {
     current_count=$(node_count); current_count=$((current_count + 1))
     if apply_transaction "$new_config" "$new_meta" "$current_count"; then
         success "节点 [$name] 添加成功"
-        printf '  %s节点链接: %s%s\n' "$YELLOW" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
+        printf '  %s节点链接:%s %s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
     else
         rm -f "$new_config" "$new_meta"; return 1
     fi
@@ -627,7 +627,7 @@ view_nodes() {
     (( count > 0 )) || { warn '暂无节点'; return 0; }
     while IFS=$'\t' read -r index name server port sni uuid public sid; do
         printf '  %s[%s]%s %s%s%s (vless-reality) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
-        printf '  %s节点链接: %s%s\n' "$YELLOW" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
+        printf '  %s节点链接:%s %s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
         printf '\n'
     done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,.value.server,(.value.port|tostring),.value.sni,.value.uuid,.value.public_key,.value.short_id] | @tsv' "$META_FILE")
 }
@@ -663,7 +663,7 @@ apply_node_update() {
     count=$(node_count)
     if apply_transaction "$new_config" "$new_meta" "$count"; then
         success "节点 [$name] 修改成功"
-        printf '  %s节点链接: %s%s\n' "$YELLOW" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
+        printf '  %s节点链接:%s %s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
     else rm -f "$new_config" "$new_meta"; return 1; fi
 }
 
@@ -696,21 +696,24 @@ modify_node() {
             0) return 0 ;;
             1)
                 read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
-                value=${value:-$name}; valid_name "$value" || { fail '节点名称无效'; continue; }
+                [[ -n "$value" ]] || continue
+                valid_name "$value" || { fail '节点名称无效'; continue; }
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 return 0
                 ;;
             2)
                 read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1
-                value=${value:-$server}; valid_text "$value" || { fail '客户端连接地址无效'; continue; }
+                [[ -n "$value" ]] || continue
+                valid_text "$value" || { fail '客户端连接地址无效'; continue; }
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 return 0
                 ;;
             3)
                 read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
-                value=${value:-$port}; valid_port "$value" || { fail '端口应为 1–65535'; continue; }
+                [[ -n "$value" ]] || continue
+                valid_port "$value" || { fail '端口应为 1–65535'; continue; }
                 value=$((10#$value))
                 if (( value != port )) && port_conflict "$value" "$tag"; then
                     fail "TCP 端口 $value 已被占用"
@@ -722,7 +725,11 @@ modify_node() {
                 ;;
             4)
                 read_input value '  请输入新 UUID (回车随机生成): ' || return 1
-                value=${value:-$($SINGBOX_BIN generate uuid 2>/dev/null)}
+                if [[ -z "$value" ]]; then
+                    value=$($SINGBOX_BIN generate uuid 2>/dev/null)
+                    [[ -n "$value" ]] || { fail 'UUID 自动生成失败'; continue; }
+                    printf '  新 UUID: %s\n' "$value"
+                fi
                 [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]] || { fail 'UUID 格式无效'; continue; }
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$value" "$public" "$sid" "$private" || return 1
@@ -730,13 +737,16 @@ modify_node() {
                 ;;
             5)
                 read_input value "  请输入新的伪装域名/SNI (回车保持 $sni): " || return 1
-                value=${value:-$sni}; valid_text "$value" || { fail '伪装域名格式无效'; continue; }
+                [[ -n "$value" ]] || continue
+                valid_text "$value" || { fail '伪装域名格式无效'; continue; }
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
                 return 0
                 ;;
             6)
                 generate_credentials || { fail '生成新凭据失败'; continue; }
+                printf '  新 Reality 私钥: %s\n  新 Reality 公钥: %s\n  新 Short ID: %s\n' \
+                    "$NEW_PRIVATE" "$NEW_PUBLIC" "$NEW_SHORT_ID"
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$uuid" "$NEW_PUBLIC" "$NEW_SHORT_ID" "$NEW_PRIVATE" || return 1
                 return 0
