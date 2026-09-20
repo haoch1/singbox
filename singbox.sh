@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -241,7 +241,10 @@ svc_start() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
         systemd) systemctl start sing-box >/dev/null 2>&1 ;;
-        openrc) rc-service sing-box start >/dev/null 2>&1 ;;
+        openrc)
+            rc-service sing-box start >/dev/null 2>&1 || return 1
+            svc_active
+            ;;
         direct)
             mkdir -p "$(dirname "$PID_FILE")" || return 1
             mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
@@ -271,7 +274,10 @@ svc_restart() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
         systemd) systemctl restart sing-box >/dev/null 2>&1 ;;
-        openrc) rc-service sing-box restart >/dev/null 2>&1 ;;
+        openrc)
+            rc-service sing-box restart >/dev/null 2>&1 || return 1
+            svc_active
+            ;;
         direct) svc_stop; sleep 1; svc_start ;;
     esac
 }
@@ -283,7 +289,7 @@ write_service_unit() {
         chmod 644 "$SYSTEMD_UNIT" || return 1
         svc_reload
     elif [[ "$INIT_SYSTEM" == openrc ]]; then
-        printf '%s\n' '#!/sbin/openrc-run' 'description="sing-box service"' "command=\"$SINGBOX_BIN\"" "command_args=\"run -c $CONFIG_FILE\"" 'supervisor="supervise-daemon"' 'respawn_delay=3' "output_log=\"$LOG_FILE\"" "error_log=\"$LOG_FILE\"" 'depend() { use net }' > "$OPENRC_UNIT" || return 1
+        printf '%s\n' '#!/sbin/openrc-run' 'description="sing-box service"' "command=\"$SINGBOX_BIN\"" "command_args=\"run -c $CONFIG_FILE\"" 'supervisor="supervise-daemon"' 'respawn_delay=3' "output_log=\"$LOG_FILE\"" "error_log=\"$LOG_FILE\"" 'depend() { use net; }' > "$OPENRC_UNIT" || return 1
         chmod 755 "$OPENRC_UNIT" || return 1
     fi
 }
