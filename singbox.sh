@@ -705,6 +705,7 @@ modify_node() {
                 [[ "$value" == "$name" ]] && continue
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             2)
@@ -718,6 +719,7 @@ modify_node() {
                 [[ "$value" == "$server" ]] && continue
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             3)
@@ -736,6 +738,7 @@ modify_node() {
                 (( value == port )) && continue
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$value" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             4)
@@ -749,6 +752,7 @@ modify_node() {
                 [[ "$value" == "$uuid" ]] && continue
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$value" "$public" "$sid" "$private" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             5)
@@ -762,6 +766,7 @@ modify_node() {
                 [[ "$value" == "$sni" ]] && continue
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             6)
@@ -770,6 +775,7 @@ modify_node() {
                     "$NEW_PRIVATE" "$NEW_PUBLIC" "$NEW_SHORT_ID"
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$uuid" "$NEW_PUBLIC" "$NEW_SHORT_ID" "$NEW_PRIVATE" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             *) fail '无效选择' ;;
