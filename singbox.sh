@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -698,11 +698,15 @@ modify_node() {
                 read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  节点名称：%s\n' "$name"
+                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
                 valid_name "$value" || { fail '节点名称无效'; continue; }
                 printf '  节点名称：%s\n' "$value"
-                [[ "$value" == "$name" ]] && continue
+                if [[ "$value" == "$name" ]]; then
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
@@ -712,11 +716,15 @@ modify_node() {
                 read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  客户端连接地址：%s\n' "$server"
+                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
                 valid_text "$value" || { fail '客户端连接地址无效'; continue; }
                 printf '  客户端连接地址：%s\n' "$value"
-                [[ "$value" == "$server" ]] && continue
+                if [[ "$value" == "$server" ]]; then
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
@@ -726,6 +734,7 @@ modify_node() {
                 read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  监听端口：%s\n' "$port"
+                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
                 valid_port "$value" || { fail '端口应为 1–65535'; continue; }
@@ -735,7 +744,10 @@ modify_node() {
                     continue
                 fi
                 printf '  监听端口：%s\n' "$value"
-                (( value == port )) && continue
+                if (( value == port )); then
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$value" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
@@ -749,7 +761,10 @@ modify_node() {
                 fi
                 [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]] || { fail 'UUID 格式无效'; continue; }
                 printf '  UUID：%s\n' "$value"
-                [[ "$value" == "$uuid" ]] && continue
+                if [[ "$value" == "$uuid" ]]; then
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$value" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
@@ -759,11 +774,15 @@ modify_node() {
                 read_input value "  请输入新的伪装域名/SNI (回车保持 $sni): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  伪装域名/SNI：%s\n' "$sni"
+                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
                 valid_text "$value" || { fail '伪装域名格式无效'; continue; }
                 printf '  伪装域名/SNI：%s\n' "$value"
-                [[ "$value" == "$sni" ]] && continue
+                if [[ "$value" == "$sni" ]]; then
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
