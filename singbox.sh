@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="0.3.3"
+SCRIPT_VERSION="1.0.0"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -25,6 +25,10 @@ PID_FILE="${SINGBOX_PID_FILE:-/run/sing-box/sing-box.pid}"
 LOG_FILE="${SINGBOX_LOG_FILE:-/var/log/sing-box.log}"
 LOCK_FILE="${SINGBOX_LOCK_FILE:-/run/lock/singbox-manager.lock}"
 LOCK_PID_FILE="${SINGBOX_LOCK_PID_FILE:-/run/lock/singbox-manager.pid}"
+LOG_MAX_BYTES=10485760
+LOG_KEEP_BYTES=5242880
+LOG_ROTATIONS=3
+TEMP_RETENTION_MINUTES=1440
 SYSTEMD_UNIT="/etc/systemd/system/sing-box.service"
 SYSTEMD_STARTUP="/etc/systemd/system/multi-user.target.wants/sing-box.service"
 OPENRC_UNIT="/etc/init.d/sing-box"
@@ -46,6 +50,49 @@ clear_terminal() {
     [[ -t 1 ]] || return 0
     command -v clear >/dev/null 2>&1 && clear 2>/dev/null || true
     printf '\033[3J\033[2J\033[H\033[0m'
+}
+
+file_size_bytes() {
+    local file=$1 size
+    size=$(stat -c '%s' "$file" 2>/dev/null || true)
+    if [[ $size =~ ^[0-9]+$ ]]; then
+        printf '%s' "$size"
+    else
+        wc -c < "$file" 2>/dev/null | tr -d '[:space:]' || printf '0'
+    fi
+}
+
+rotate_file_log() {
+    local file=$1 size temp index
+    [[ -f $file ]] || return 0
+    size=$(file_size_bytes "$file")
+    [[ $size =~ ^[0-9]+$ ]] || return 0
+    (( size > LOG_MAX_BYTES )) || return 0
+    rm -f -- "$file.$((LOG_ROTATIONS + 1))"
+    for (( index=LOG_ROTATIONS; index > 1; index-- )); do
+        [[ -e "$file.$((index - 1))" ]] && mv -f -- "$file.$((index - 1))" "$file.$index" 2>/dev/null || true
+    done
+    cp -p -- "$file" "$file.1" 2>/dev/null || return 0
+    temp=$(mktemp "${file}.trim.XXXXXX") || return 0
+    if tail -c "$LOG_KEEP_BYTES" "$file" > "$temp" 2>/dev/null && cat "$temp" > "$file"; then
+        chmod 640 "$file" 2>/dev/null || true
+    fi
+    rm -f -- "$temp"
+}
+
+cleanup_stale_temp_files() {
+    local directory=$1 pattern
+    shift
+    [[ -d $directory ]] || return 0
+    for pattern in "$@"; do
+        find "$directory" -mindepth 1 -maxdepth 1 -name "$pattern" -mmin +"$TEMP_RETENTION_MINUTES" -exec rm -rf -- {} + 2>/dev/null || true
+    done
+}
+
+maintenance_cleanup() {
+    [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
+    cleanup_stale_temp_files "$SINGBOX_DIR" \
+        '.transaction.*' '.core.*' '.config.*' '.meta.*' '.realm-script.*' '.script.*'
 }
 
 lock_fd_is_inherited() {
@@ -191,6 +238,7 @@ svc_disable() {
 }
 
 svc_start() {
+    [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
         systemd) systemctl start sing-box >/dev/null 2>&1 ;;
         openrc) rc-service sing-box start >/dev/null 2>&1 ;;
@@ -220,6 +268,7 @@ svc_stop() {
 }
 
 svc_restart() {
+    [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
         systemd) systemctl restart sing-box >/dev/null 2>&1 ;;
         openrc) rc-service sing-box restart >/dev/null 2>&1 ;;
@@ -512,14 +561,14 @@ add_node() {
     require_core || return 1
     local server port sni name id tag uuid private public sid current_count
     server=$(server_ip_guess)
-    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
+    read_input server "  ${YELLOW}服务器地址 (回车使用 ${server:-需手动输入}): ${NC}" || return 1
     server=${server:-$(server_ip_guess)}
     while [[ -z "$server" ]] || ! valid_text "$server"; do
-        fail '请输入有效的 IP 或域名'; read_input server '  服务器地址: ' || return 1
+        fail '请输入有效的 IP 或域名'; read_input server "  ${YELLOW}服务器地址: ${NC}" || return 1
     done
     port="$DEFAULT_PORT"
     while true; do
-        read_input port "  监听端口 (默认 $DEFAULT_PORT): " || return 1
+        read_input port "  ${YELLOW}监听端口 (默认 $DEFAULT_PORT): ${NC}" || return 1
         port=${port:-$DEFAULT_PORT}
         valid_port "$port" || { fail '端口应为 1–65535'; continue; }
         port=$((10#$port))
@@ -527,11 +576,11 @@ add_node() {
         break
     done
     sni="$DEFAULT_SNI"
-    read_input sni "  伪装域名 (默认 $DEFAULT_SNI): " || return 1
+    read_input sni "  ${YELLOW}伪装域名 (默认 $DEFAULT_SNI): ${NC}" || return 1
     sni=${sni:-$DEFAULT_SNI}
     valid_text "$sni" || { fail '伪装域名格式无效'; return 1; }
     name="VLESS-TCP-REALITY-VISION-$port"
-    read_input name "  节点名称 (默认 $name): " || return 1
+    read_input name "  ${YELLOW}节点名称 (默认 $name): ${NC}" || return 1
     name=${name:-"VLESS-TCP-REALITY-VISION-$port"}
     valid_name "$name" || { fail '节点名称不能为空、不能超过 80 字或包含控制字符'; return 1; }
     generate_credentials || { fail '生成节点凭据失败'; return 1; }
@@ -566,7 +615,7 @@ choose_node() {
     count=$(node_count)
     (( count > 0 )) || { warn '当前没有节点'; return 1; }
     print_nodes
-    read_input choice '  请输入节点序号 (0 取消): ' || return 1
+    read_input choice "  ${YELLOW}请输入节点序号 (0 取消): ${NC}" || return 1
     [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )) || { [[ "$choice" == 0 || -z "$choice" ]] && return 1; fail '无效选择'; return 1; }
     printf -v "$result" '%d' "$((choice - 1))"
 }
@@ -598,7 +647,7 @@ apply_node_update() {
 
 confirm_node_update() {
     local answer
-    read_input answer '  确认保存并应用本次修改？[Y/N]: ' || return 1
+    read_input answer "  ${YELLOW}确认保存并应用本次修改？[Y/N]: ${NC}" || return 1
     [[ "$answer" =~ ^[nN]$ ]] && { warn '已取消本次修改'; return 1; }
     return 0
 }
@@ -617,28 +666,28 @@ modify_node() {
         public=$(jq -r --argjson i "$index" '.nodes[$i].public_key' "$META_FILE")
         sid=$(jq -r --argjson i "$index" '.nodes[$i].short_id' "$META_FILE")
         private=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.reality.private_key' "$CONFIG_FILE")
-        printf '\n  当前节点: %s%s%s (vless-reality) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
+        printf '\n  当前节点: %s%s%s (vless-reality) @ %s%s%s\n\n' "$YELLOW" "$name" "$NC" "$YELLOW" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改 UUID\n  %s[5]%s 修改伪装域名/SNI\n  %s[6]%s 重新生成 Reality 密钥和 Short ID\n  %s[0]%s 返回\n' \
-            "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
-        read_input choice '  请选择修改项: ' || return 1
+            "$YELLOW" "$BLUE" "$YELLOW" "$BLUE" "$YELLOW" "$BLUE" "$YELLOW" "$BLUE" "$YELLOW" "$BLUE" "$YELLOW" "$BLUE" "$YELLOW" "$BLUE"
+        read_input choice "  ${YELLOW}请选择修改项: ${NC}" || return 1
         case "$choice" in
             0) return 0 ;;
             1)
-                read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
+                read_input value "  ${YELLOW}请输入新节点名称 (回车保持 $name): ${NC}" || return 1
                 value=${value:-$name}; valid_name "$value" || { fail '节点名称无效'; continue; }
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 return 0
                 ;;
             2)
-                read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1
+                read_input value "  ${YELLOW}请输入新的客户端连接地址 (回车保持 $server): ${NC}" || return 1
                 value=${value:-$server}; valid_text "$value" || { fail '客户端连接地址无效'; continue; }
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 return 0
                 ;;
             3)
-                read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
+                read_input value "  ${YELLOW}请输入新的监听端口 (回车保持 $port): ${NC}" || return 1
                 value=${value:-$port}; valid_port "$value" || { fail '端口应为 1–65535'; continue; }
                 value=$((10#$value))
                 if (( value != port )) && port_conflict "$value" "$tag"; then
@@ -650,7 +699,7 @@ modify_node() {
                 return 0
                 ;;
             4)
-                read_input value '  请输入新 UUID (回车随机生成): ' || return 1
+                read_input value "  ${YELLOW}请输入新 UUID (回车随机生成): ${NC}" || return 1
                 value=${value:-$($SINGBOX_BIN generate uuid 2>/dev/null)}
                 [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]] || { fail 'UUID 格式无效'; continue; }
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
@@ -658,7 +707,7 @@ modify_node() {
                 return 0
                 ;;
             5)
-                read_input value "  请输入新的伪装域名/SNI (回车保持 $sni): " || return 1
+                read_input value "  ${YELLOW}请输入新的伪装域名/SNI (回车保持 $sni): ${NC}" || return 1
                 value=${value:-$sni}; valid_text "$value" || { fail '伪装域名格式无效'; continue; }
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
                 apply_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
@@ -679,7 +728,7 @@ delete_node() {
     local index tag name answer new_config new_meta count
     choose_node index || return 1
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE"); name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
-    read_input answer "  确认删除节点 [$name]？(Y/N): " || return 1
+    read_input answer "  ${YELLOW}确认删除节点 [$name]？(Y/N): ${NC}" || return 1
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
     jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" > "$new_config" || return 1
@@ -691,7 +740,7 @@ delete_node() {
 clear_nodes() {
     local count answer new_config new_meta
     count=$(node_count); (( count > 0 )) || { warn '暂无节点'; return 0; }
-    read_input answer "  确认清空全部 $count 个节点？(Y/N): " || return 1
+    read_input answer "  ${YELLOW}确认清空全部 $count 个节点？(Y/N): ${NC}" || return 1
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
     jq '.inbounds=[]' "$CONFIG_FILE" > "$new_config" || return 1; jq '.nodes=[]' "$META_FILE" > "$new_meta" || return 1
@@ -855,6 +904,7 @@ main() {
     detect_init; ensure_dependencies || return 1; mkdir -p /run/lock || return 1; mkdir -p "$SINGBOX_DIR" || return 1
     acquire_manager_lock || return 1
     init_state || return 1
+    maintenance_cleanup
     resolve_core >/dev/null 2>&1 || true
     SCRIPT_TARGET="${SCRIPT_TARGET:-/usr/local/bin/s}"
     case "${1:-}" in
