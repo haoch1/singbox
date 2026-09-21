@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.1.5"
+SCRIPT_VERSION="1.1.6"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -249,7 +249,7 @@ svc_active() {
 
 svc_enabled() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl is-enabled --quiet sing-box 9>&- ;;
+        systemd) systemctl is-enabled --quiet sing-box >/dev/null 2>&1 9>&- ;;
         openrc) rc-update show default 2>/dev/null 9>&- | grep -Eq '(^|[[:space:]])sing-box([[:space:]]|$)' 9>&- ;;
         direct) return 1 ;;
     esac
