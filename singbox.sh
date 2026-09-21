@@ -411,6 +411,7 @@ core_version_number() {
 
 version_at_least() {
     local current="$1" required="$2" current_part required_part index
+    current="${current#v}"
     IFS='.' read -r -a current_parts <<< "${current%%-*}"
     IFS='.' read -r -a required_parts <<< "$required"
     for index in 0 1 2; do
@@ -1088,7 +1089,7 @@ modify_node() {
     protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
     case "$protocol" in
         vless-reality) modify_vless_node "$index" ;;
-        anytls) modify_anytls_node "$index" ;;
+        anytls) require_anytls_core || return 1; modify_anytls_node "$index" ;;
         ss2022) modify_ss2022_node "$index" ;;
         *) fail '节点协议不受支持'; return 1 ;;
     esac
