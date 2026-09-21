@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.1.6"
+SCRIPT_VERSION="1.1.7"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -27,14 +27,7 @@ OPENRC_STARTUP="/etc/runlevels/default/sing-box"
 DEFAULT_PORT=8443
 DEFAULT_SS_PORT=8388
 DEFAULT_SNI="www.bing.com"
-ACME_DIR="$SINGBOX_DIR/acme"
 SS2022_METHOD="2022-blake3-aes-128-gcm"
-ACME_ALTERNATIVE_HTTP_PORT=0
-ACME_PROVIDER_TAG=''
-ACME_PROVIDER_DIR=''
-ACME_PROVIDER_NEW=0
-ACME_PROVIDER_CREATED=0
-ACME_PROVIDER_OBJECT=''
 INIT_SYSTEM="direct"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
@@ -45,26 +38,6 @@ info() { printf '  %s[信息] %s%s\n' "$CYAN" "$*" "$NC"; }
 warn() { printf '  %s[注意] %s%s\n' "$YELLOW" "$*" "$NC"; }
 success() { printf '  %s[成功] %s%s\n' "$GREEN" "$*" "$NC"; }
 interrupt_exit() { printf '\n'; exit 130; }
-
-reset_acme_state() {
-    ACME_DISABLE_HTTP=false
-    ACME_DISABLE_TLS=false
-    ACME_ALTERNATIVE_HTTP_PORT=0
-    ACME_PROVIDER_TAG=''
-    ACME_PROVIDER_DIR=''
-    ACME_PROVIDER_NEW=0
-    ACME_PROVIDER_CREATED=0
-    ACME_PROVIDER_OBJECT=''
-}
-
-cleanup_new_acme_dir() {
-    local status
-    if (( ACME_PROVIDER_NEW && ACME_PROVIDER_CREATED )) && [[ -n "$ACME_PROVIDER_DIR" && "$ACME_PROVIDER_DIR" == "$ACME_DIR/"* ]]; then
-        acme_dir_reference_state "$ACME_PROVIDER_DIR"; status=$?
-        (( status == 1 )) && rm -rf -- "$ACME_PROVIDER_DIR"
-    fi
-    reset_acme_state
-}
 
 clear_terminal() {
     [[ -t 1 ]] || return 0
@@ -373,29 +346,6 @@ valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ));
 valid_text() { [[ -n "$1" && "$1" != *[[:space:]/\\]* && "$1" != *[[:cntrl:]]* ]]; }
 valid_name() { [[ -n "$1" && ${#1} -le 80 && "$1" != *[[:cntrl:]]* ]]; }
 
-valid_ip_literal() {
-    local value="$1" part count=0 compressed=0 prefix remainder
-    if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-        IFS='.' read -r -a parts <<< "$value"
-        for part in "${parts[@]}"; do (( 10#$part <= 255 )) || return 1; done
-        return 0
-    fi
-    [[ "$value" == *:* && "$value" =~ ^[0-9a-fA-F:.]+$ ]] || return 1
-    [[ "$value" != :* || "$value" == ::* ]] || return 1
-    [[ "$value" != *: || "$value" == *:: ]] || return 1
-    [[ "$value" == *::* ]] && compressed=1
-    prefix=${value%%::*}; remainder=${value#*::}
-    [[ "$prefix" != *::* && "$remainder" != *::* ]] || return 1
-    [[ "$value" != *.* ]] || return 1
-    IFS=':' read -r -a parts <<< "$value"
-    for part in "${parts[@]}"; do
-        [[ -z "$part" || "$part" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
-        [[ -n "$part" ]] && count=$((count + 1))
-    done
-    (( count <= 8 )) || return 1
-    if (( compressed )); then (( count < 8 )) || return 1; else (( count == 8 )) || return 1; fi
-}
-
 uri_escape() { printf '%s' "$1" | jq -sRr @uri; }
 
 format_server_for_uri() {
@@ -445,170 +395,17 @@ init_state() {
 
 node_count() { jq -r '.nodes | length' "$META_FILE"; }
 
-acme_dir_reference_state() {
-    local dir="$1" cfg meta status
-    [[ -n "$dir" && "$dir" == "$ACME_DIR/"* ]] || return 2
-    cfg=$(jq -r --arg dir "$dir" '
-      any(.certificate_providers[]?; (.data_directory // "") == $dir) or
-      any(.inbounds[]?; ((.tls.certificate_provider | type) == "object") and ((.tls.certificate_provider.data_directory // "") == $dir))
-    ' "$CONFIG_FILE" 2>/dev/null); status=$?; (( status == 0 )) || return 2
-    meta=$(jq -r --arg dir "$dir" 'any(.nodes[]?; (.acme_dir // "") == $dir)' "$META_FILE" 2>/dev/null); status=$?; (( status == 0 )) || return 2
-    [[ "$cfg" == true || "$meta" == true ]] && return 0
-    return 1
-}
-
-acme_provider_ports() {
-    jq -r '
-      [if ((.disable_http_challenge // false) == false) then (if ((.alternative_http_port // 0) | tonumber?) > 0 then ((.alternative_http_port | tonumber?)) else 80 end) else empty end,
-       if ((.disable_tls_alpn_challenge // false) == false) then (if ((.alternative_tls_port // 0) | tonumber?) > 0 then ((.alternative_tls_port | tonumber?)) else 443 end) else empty end]
-      | map(select(. > 0)) | unique | join(",")
-    ' <<< "$1" 2>/dev/null || true
-}
-
-acme_challenge_port_conflict() {
-    local port="$1" exclude_provider="${2:-}" exclude_inline_tag="${3:-}" status
-    jq -e --argjson port "$port" --arg exclude_provider "$exclude_provider" --arg exclude_inline_tag "$exclude_inline_tag" '
-        def uses_port($provider):
-            ($provider.type == "acme") and (
-                ((($provider.disable_http_challenge // false) == false) and (((if ($provider.alternative_http_port // 0) > 0 then $provider.alternative_http_port else 80 end) | tonumber?) == $port)) or
-                ((($provider.disable_tls_alpn_challenge // false) == false) and (((if ($provider.alternative_tls_port // 0) > 0 then $provider.alternative_tls_port else 443 end) | tonumber?) == $port))
-            );
-        any(.certificate_providers[]?; (.tag // "") != $exclude_provider and uses_port(.)) or
-        any(.inbounds[]?; (.tag // "") != $exclude_inline_tag and ((.tls.certificate_provider | type) == "object") and uses_port(.tls.certificate_provider))
-    ' "$CONFIG_FILE" >/dev/null 2>&1
-    status=$?
-    (( status == 0 )) && return 0
-    (( status == 1 )) && return 1
-    return 2
-}
-
 port_conflict() {
-    local port="$1" exclude="${2:-}" mode="${3:-tcp}" exclude_provider="${4:-}" exclude_inline_tag="${5:-}" ignore_system_ports="${6:-}" acme_status
+    local port="$1" exclude="${2:-}" mode="${3:-tcp}"
     jq -e --argjson p "$port" --arg e "$exclude" '.nodes[]? | select((.port|tonumber) == $p and ($e == "" or (.tag // "") != $e))' "$META_FILE" >/dev/null 2>&1 && return 0
     jq -e --argjson p "$port" --arg e "$exclude" '.inbounds[]? | select((.listen_port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))' "$CONFIG_FILE" >/dev/null 2>&1 && return 0
-    acme_challenge_port_conflict "$port" "$exclude_provider" "$exclude_inline_tag"
-    acme_status=$?
-    (( acme_status == 0 || acme_status > 1 )) && return 0
-    if command -v ss >/dev/null 2>&1 && [[ ",$ignore_system_ports," != *",$port,"* ]]; then
+    if command -v ss >/dev/null 2>&1; then
         ss -H -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
         if [[ "$mode" == tcp_udp ]]; then
             ss -H -lun 2>/dev/null | awk -v p=":$port" '$5 ~ p"$" || $4 ~ p"$" {found=1} END {exit !found}' && return 0
         fi
     fi
     return 1
-}
-
-core_version_number() {
-    local output
-    output=$("$SINGBOX_BIN" version 2>/dev/null || true)
-    awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output"
-}
-
-version_at_least() {
-    local current="$1" required="$2" current_part required_part index
-    current="${current#v}"
-    IFS='.' read -r -a current_parts <<< "${current%%-*}"
-    IFS='.' read -r -a required_parts <<< "$required"
-    for index in 0 1 2; do
-        current_part=${current_parts[$index]:-0}; required_part=${required_parts[$index]:-0}
-        [[ "$current_part" =~ ^[0-9]+$ && "$required_part" =~ ^[0-9]+$ ]] || return 1
-        (( 10#$current_part > 10#$required_part )) && return 0
-        (( 10#$current_part < 10#$required_part )) && return 1
-    done
-    return 0
-}
-
-require_anytls_core() {
-    local version
-    require_core || return 1
-    version=$(core_version_number)
-    version_at_least "$version" 1.14.0 || { warn 'AnyTLS 需要 sing-box 1.14.0 或更高版本，请先执行菜单 [9] 安装/更新核心'; return 1; }
-}
-
-select_acme_challenge() {
-    local exclude="${1:-}" exclude_provider="${2:-}" exclude_inline_tag="${3:-}" ignore_system_ports="${4:-}"
-    ACME_ALTERNATIVE_HTTP_PORT=0
-    if ! port_conflict 80 "$exclude" tcp "$exclude_provider" "$exclude_inline_tag" "$ignore_system_ports"; then
-        ACME_DISABLE_HTTP=false
-        ACME_DISABLE_TLS=true
-    elif ! port_conflict 443 "$exclude" tcp "$exclude_provider" "$exclude_inline_tag" "$ignore_system_ports"; then
-        ACME_DISABLE_HTTP=true
-        ACME_DISABLE_TLS=false
-    else
-        if port_conflict 9080 "$exclude" tcp "$exclude_provider" "$exclude_inline_tag" "$ignore_system_ports"; then
-            fail 'ACME 备用端口 9080 已被占用'
-            return 1
-        fi
-        ACME_DISABLE_HTTP=false
-        ACME_DISABLE_TLS=true
-        ACME_ALTERNATIVE_HTTP_PORT=9080
-    fi
-}
-
-prepare_acme_provider() {
-    local server="$1" exclude="${2:-}" inline_tag="${3:-}" exclude_provider="${4:-}" ignore_system_ports="${5:-}" provider_id inline_provider
-    reset_acme_state
-    ACME_PROVIDER_TAG=$(jq -r --arg server "$server" \
-        '[.certificate_providers[]? | select(.type=="acme" and (.domain // []) == [$server])] | first | .tag // empty' "$CONFIG_FILE" 2>/dev/null || true)
-    if [[ -n "$ACME_PROVIDER_TAG" ]]; then
-        ACME_PROVIDER_DIR=$(jq -r --arg tag "$ACME_PROVIDER_TAG" '.certificate_providers[]? | select(.tag==$tag) | .data_directory // empty' "$CONFIG_FILE")
-        [[ -n "$ACME_PROVIDER_DIR" ]] || { fail '现有 ACME 证书提供者缺少数据目录'; return 1; }
-        ACME_DISABLE_HTTP=$(jq -r --arg tag "$ACME_PROVIDER_TAG" '.certificate_providers[]? | select(.tag==$tag) | .disable_http_challenge // false' "$CONFIG_FILE")
-        ACME_DISABLE_TLS=$(jq -r --arg tag "$ACME_PROVIDER_TAG" '.certificate_providers[]? | select(.tag==$tag) | .disable_tls_alpn_challenge // false' "$CONFIG_FILE")
-        ACME_ALTERNATIVE_HTTP_PORT=$(jq -r --arg tag "$ACME_PROVIDER_TAG" '.certificate_providers[]? | select(.tag==$tag) | .alternative_http_port // 0' "$CONFIG_FILE")
-        ACME_PROVIDER_NEW=0
-        ACME_PROVIDER_CREATED=0
-        if [[ ! -d "$ACME_PROVIDER_DIR" ]]; then
-            mkdir -p "$ACME_PROVIDER_DIR" && chmod 700 "$ACME_PROVIDER_DIR" || { fail '创建 ACME 证书目录失败'; return 1; }
-            ACME_PROVIDER_CREATED=1
-        fi
-        return 0
-    fi
-    inline_provider=$(jq -c --arg server "$server" --arg inline_tag "$inline_tag" '
-        [.inbounds[]? | select(.type=="anytls" and ($inline_tag == "" or .tag == $inline_tag) and ((.tls.certificate_provider | type) == "object") and ((.tls.certificate_provider.domain // []) == [$server])] | first | .tls.certificate_provider // empty' "$CONFIG_FILE" 2>/dev/null || true)
-    if [[ -n "$inline_provider" && "$inline_provider" != null ]]; then
-        ACME_PROVIDER_OBJECT="$inline_provider"
-        ACME_PROVIDER_DIR=$(jq -r '.data_directory // empty' <<< "$inline_provider")
-        [[ -n "$ACME_PROVIDER_DIR" ]] || { fail '旧版 AnyTLS 证书提供者缺少数据目录'; return 1; }
-        provider_id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null) || return 1
-        [[ "$provider_id" =~ ^[0-9a-fA-F]{16}$ ]] || { fail '生成 ACME 证书提供者标识失败'; return 1; }
-        ACME_PROVIDER_TAG="anytls-acme-$provider_id"
-        ACME_DISABLE_HTTP=$(jq -r '.disable_http_challenge // false' <<< "$inline_provider")
-        ACME_DISABLE_TLS=$(jq -r '.disable_tls_alpn_challenge // false' <<< "$inline_provider")
-        ACME_ALTERNATIVE_HTTP_PORT=$(jq -r '.alternative_http_port // 0' <<< "$inline_provider")
-        ACME_PROVIDER_NEW=1
-        if [[ ! -d "$ACME_PROVIDER_DIR" ]]; then
-            mkdir -p "$ACME_PROVIDER_DIR" && chmod 700 "$ACME_PROVIDER_DIR" || { fail '创建 ACME 证书目录失败'; return 1; }
-            ACME_PROVIDER_CREATED=1
-        fi
-        return 0
-    fi
-    select_acme_challenge "$exclude" "$exclude_provider" "$inline_tag" "$ignore_system_ports" || return 1
-    provider_id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null) || return 1
-    [[ "$provider_id" =~ ^[0-9a-fA-F]{16}$ ]] || { fail '生成 ACME 证书提供者标识失败'; return 1; }
-    ACME_PROVIDER_TAG="anytls-acme-$provider_id"
-    ACME_PROVIDER_DIR="$ACME_DIR/$provider_id"
-    ACME_PROVIDER_OBJECT=''
-    ACME_PROVIDER_NEW=1
-    ACME_PROVIDER_CREATED=0
-    if [[ ! -d "$ACME_PROVIDER_DIR" ]]; then
-        mkdir -p "$ACME_PROVIDER_DIR" && chmod 700 "$ACME_PROVIDER_DIR" || { fail '创建 ACME 证书目录失败'; return 1; }
-        ACME_PROVIDER_CREATED=1
-    fi
-}
-
-validate_anytls_acme_port() {
-    local port="$1" disable_http="${2:-$ACME_DISABLE_HTTP}" disable_tls="${3:-$ACME_DISABLE_TLS}" alternative_http_port="${4:-$ACME_ALTERNATIVE_HTTP_PORT}" challenge_port=0
-    if [[ "$disable_http" == false ]]; then
-        challenge_port=$alternative_http_port
-        (( challenge_port > 0 )) || challenge_port=80
-    elif [[ "$disable_tls" == false ]]; then
-        challenge_port=443
-    fi
-    if (( challenge_port > 0 && port == challenge_port )); then
-        fail "AnyTLS 监听端口 $port 与 ACME 验证端口冲突"
-        return 1
-    fi
 }
 
 generate_credentials() {
@@ -625,12 +422,6 @@ build_vless_link() {
     local host; host=$(format_server_for_uri "$server")
     printf 'vless://%s@%s:%s?security=reality&encryption=none&pbk=%s&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=%s&sid=%s#%s' \
         "$uuid" "$host" "$port" "$(uri_escape "$public")" "$(uri_escape "$sni")" "$sid" "$(uri_escape "$name")"
-}
-
-build_anytls_link() {
-    local server="$1" port="$2" password="$3" name="$4" host
-    host=$(format_server_for_uri "$server")
-    printf 'anytls://%s@%s:%s/?sni=%s#%s' "$(uri_escape "$password")" "$host" "$port" "$(uri_escape "$server")" "$(uri_escape "$name")"
 }
 
 build_ss2022_link() {
@@ -654,7 +445,6 @@ build_node_link() {
                 "$(jq -r --argjson i "$index" '.nodes[$i].public_key' "$META_FILE")" \
                 "$(jq -r --argjson i "$index" '.nodes[$i].short_id' "$META_FILE")" "$name"
             ;;
-        anytls) build_anytls_link "$server" "$port" "$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")" "$name" ;;
         ss2022) build_ss2022_link "$server" "$port" "$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")" "$name" ;;
         *) return 1 ;;
     esac
@@ -841,42 +631,6 @@ add_vless_node() {
     fi
 }
 
-add_anytls_node() {
-    require_anytls_core || return 1
-    local server port name id tag password
-    reset_acme_state
-    server=$(server_ip_guess)
-    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
-    server=${server:-$(server_ip_guess)}
-    while ! valid_ip_literal "$server"; do
-        fail 'AnyTLS 服务器地址必须是 IPv4 或 IPv6 地址'; read_input server '  服务器地址: ' || return 1
-    done
-    port="$DEFAULT_PORT"
-    while true; do
-        read_input port "  监听端口 (默认 $DEFAULT_PORT): " || return 1
-        port=${port:-$DEFAULT_PORT}
-        valid_port "$port" || { fail '端口应为 1–65535'; continue; }
-        port=$((10#$port))
-        port_conflict "$port" "" tcp && { fail "TCP 端口 $port 已被占用"; continue; }
-        break
-    done
-    name="AnyTLS-$port"
-    read_input name "  节点名称 (默认 $name): " || return 1
-    name=${name:-"AnyTLS-$port"}
-    valid_name "$name" || { fail '节点名称不能为空、不能超过 80 字或包含控制字符'; return 1; }
-    password=$("$SINGBOX_BIN" generate rand --hex 32 2>/dev/null) || { fail '生成 AnyTLS 密码失败'; return 1; }
-    [[ "$password" =~ ^[0-9a-fA-F]{64}$ ]] || { fail '生成 AnyTLS 密码格式无效'; return 1; }
-    id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null || printf '%s' "$(date +%s%N)")
-    tag="anytls-in-$id"
-    prepare_acme_provider "$server" || { cleanup_new_acme_dir; return 1; }
-    validate_anytls_acme_port "$port" || { cleanup_new_acme_dir; return 1; }
-    apply_anytls_node_update '' "$name" "$server" "$port" "$password" "$ACME_PROVIDER_TAG" "$ACME_PROVIDER_DIR" "$ACME_PROVIDER_NEW" "$ACME_DISABLE_HTTP" "$ACME_DISABLE_TLS" "$ACME_ALTERNATIVE_HTTP_PORT" "$tag" "$id" '' '' "$ACME_PROVIDER_OBJECT" || {
-        cleanup_new_acme_dir
-        return 1
-    }
-    reset_acme_state
-}
-
 add_ss2022_node() {
     require_core || return 1
     local server port name id tag password current_count new_config new_meta
@@ -921,18 +675,16 @@ add_ss2022_node() {
 add_node() {
     local protocol
     require_core || return 1
-    printf '\n  请选择协议:\n\n  %s[1]%s VLESS + Reality + Vision\n  %s[2]%s AnyTLS\n  %s[3]%s Shadowsocks 2022\n  %s[0]%s 返回\n' \
-        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+    printf '\n  请选择协议:\n\n  %s[1]%s VLESS + Reality + Vision\n  %s[2]%s Shadowsocks 2022\n  %s[0]%s 返回\n' \
+        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
     read_input protocol '  请选择协议: ' || return 1
     case "$protocol" in
         1) add_vless_node ;;
-        2) add_anytls_node ;;
-        3) add_ss2022_node ;;
+        2) add_ss2022_node ;;
         0|'') return 0 ;;
         *) fail '无效选择'; return 1 ;;
     esac
 }
-
 print_nodes() {
     jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE" | \
         while IFS=$'\t' read -r index name protocol port; do
@@ -1131,124 +883,6 @@ modify_vless_node() {
     done
 }
 
-apply_anytls_node_update() {
-    local old_tag="$1" name="$2" server="$3" port="$4" password="$5" provider_tag="$6" provider_dir="$7" provider_new="$8"
-    local disable_http="$9" disable_tls="${10}" alternative_http_port="${11}" new_tag="${12:-}" node_id="${13:-}" old_dir="${14:-}" old_provider_tag="${15:-}" provider_object="${16:-}"
-    local new_config new_meta count config_matches meta_matches old_dir_status
-    new_tag=${new_tag:-$old_tag}
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
-    if [[ -n "$old_tag" ]]; then
-        config_matches=$(jq -r --arg tag "$old_tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE" 2>/dev/null) || { rm -f "$new_config" "$new_meta"; fail '目标节点配置读取失败'; return 1; }
-        meta_matches=$(jq -r --arg tag "$old_tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE" 2>/dev/null) || { rm -f "$new_config" "$new_meta"; fail '目标节点元数据读取失败'; return 1; }
-        if [[ "$config_matches" != 1 || "$meta_matches" != 1 ]]; then
-            rm -f "$new_config" "$new_meta"; fail '目标节点信息不一致，未应用修改，请重新进入菜单'; return 1
-        fi
-    fi
-    if [[ -z "$old_tag" ]]; then
-        jq --arg tag "$new_tag" --arg id "$node_id" --arg server "$server" --arg password "$password" --arg provider "$provider_tag" --arg dir "$provider_dir" --arg provider_object "$provider_object" --argjson port "$port" --argjson provider_new "$provider_new" --argjson disable_http "$disable_http" --argjson disable_tls "$disable_tls" --argjson alternative_http_port "$alternative_http_port" --arg name "$name" \
-            '($provider_object | if length > 0 then fromjson else null end) as $legacy | (if $provider_new == 1 then .certificate_providers=((.certificate_providers // []) + [if $legacy == null then {type:"acme",tag:$provider,domain:[$server],default_server_name:$server,provider:"letsencrypt",profile:"shortlived",key_type:"p256",data_directory:$dir,disable_http_challenge:$disable_http,disable_tls_alpn_challenge:$disable_tls,alternative_http_port:$alternative_http_port} else ($legacy | .tag=$provider) end]) else . end) | if $legacy == null then . else .inbounds |= map(if .type=="anytls" and ((.tls.certificate_provider | type)=="object") and .tls.certificate_provider==$legacy then .tls.certificate_provider=$provider else . end) end | .inbounds += [{type:"anytls",tag:$tag,listen:"::",listen_port:$port,users:[{name:"default",password:$password}],tls:{enabled:true,certificate_provider:$provider}}]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
-        jq --arg tag "$new_tag" --arg id "$node_id" --arg name "$name" --arg server "$server" --arg password "$password" --arg provider "$provider_tag" --arg dir "$provider_dir" --arg provider_object "$provider_object" --argjson port "$port" '($provider_object | if length > 0 then fromjson else null end) as $legacy | if $legacy == null then . else .nodes |= map(if (.protocol // "vless-reality")=="anytls" and .server==$server and .acme_dir==$dir then .certificate_provider=$provider else . end) end | .nodes += [{protocol:"anytls",id:$id,tag:$tag,name:$name,server:$server,port:$port,password:$password,certificate_provider:$provider,acme_dir:$dir}]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
-    else
-        jq --arg old "$old_tag" --arg provider "$provider_tag" --arg server "$server" --arg password "$password" --arg dir "$provider_dir" --arg provider_object "$provider_object" --argjson port "$port" --argjson provider_new "$provider_new" --argjson disable_http "$disable_http" --argjson disable_tls "$disable_tls" --argjson alternative_http_port "$alternative_http_port" \
-            '($provider_object | if length > 0 then fromjson else null end) as $legacy | (if $provider_new == 1 then .certificate_providers=((.certificate_providers // []) + [if $legacy == null then {type:"acme",tag:$provider,domain:[$server],default_server_name:$server,provider:"letsencrypt",profile:"shortlived",key_type:"p256",data_directory:$dir,disable_http_challenge:$disable_http,disable_tls_alpn_challenge:$disable_tls,alternative_http_port:$alternative_http_port} else ($legacy | .tag=$provider) end]) else . end) | if $legacy == null then . else .inbounds |= map(if .type=="anytls" and ((.tls.certificate_provider | type)=="object") and .tls.certificate_provider==$legacy then .tls.certificate_provider=$provider else . end) end | (.inbounds[] | select(.tag==$old)) |= (.listen_port=$port | .users[0].password=$password | .tls.enabled=true | .tls.certificate_provider=$provider)' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
-        jq --arg old "$old_tag" --arg name "$name" --arg server "$server" --arg password "$password" --arg provider "$provider_tag" --arg dir "$provider_dir" --arg provider_object "$provider_object" --argjson port "$port" '($provider_object | if length > 0 then fromjson else null end) as $legacy | if $legacy == null then . else .nodes |= map(if (.protocol // "vless-reality")=="anytls" and .server==$server and .acme_dir==$dir then .certificate_provider=$provider else . end) end | (.nodes[] | select(.tag==$old)) |= (.protocol="anytls" | .name=$name | .server=$server | .port=$port | .password=$password | .certificate_provider=$provider | .acme_dir=$dir)' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
-        if [[ -n "$old_provider_tag" && "$old_provider_tag" != "$provider_tag" ]]; then
-            jq --arg old "$old_provider_tag" '. as $root | if any(.certificate_providers[]?; .tag==$old and any($root.inbounds[]?; .tls.certificate_provider==$old)) then . else .certificate_providers |= map(select(.tag != $old)) end' "$new_config" > "${new_config}.clean" && mv -f "${new_config}.clean" "$new_config" || { rm -f "$new_config" "${new_config}.clean" "$new_meta"; return 1; }
-        fi
-    fi
-    jq -e --arg tag "$new_tag" --arg provider "$provider_tag" --arg password "$password" --argjson port "$port" 'any(.inbounds[]?; .tag==$tag and .type=="anytls" and (.listen_port|tonumber?)==$port and .users[0].password==$password and .tls.certificate_provider==$provider)' "$new_config" >/dev/null 2>&1 || { rm -f "$new_config" "$new_meta"; fail 'AnyTLS 配置修改结果校验失败'; return 1; }
-    jq -e --arg tag "$new_tag" --arg name "$name" --arg server "$server" --arg password "$password" --arg provider "$provider_tag" --arg dir "$provider_dir" --argjson port "$port" 'any(.nodes[]?; .tag==$tag and (.protocol // "vless-reality")=="anytls" and .name==$name and .server==$server and (.port|tonumber?)==$port and .password==$password and .certificate_provider==$provider and .acme_dir==$dir)' "$new_meta" >/dev/null 2>&1 || { rm -f "$new_config" "$new_meta"; fail 'AnyTLS 元数据修改结果校验失败'; return 1; }
-    count=$(node_count); (( count == 0 )) && count=1
-    if apply_transaction "$new_config" "$new_meta" "$count"; then
-        if [[ -n "$old_dir" && "$old_dir" == "$ACME_DIR/"* && "$old_dir" != "$provider_dir" ]]; then
-            acme_dir_reference_state "$old_dir"; old_dir_status=$?
-            (( old_dir_status == 1 )) && rm -rf -- "$old_dir"
-        fi
-        success "节点 [$name] $(if [[ -z "$old_tag" ]]; then printf 添加成功; else printf 修改成功; fi)"
-        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_anytls_link "$server" "$port" "$password" "$name")" "$NC"
-    else
-        rm -f "$new_config" "$new_meta"
-        return 1
-    fi
-}
-
-modify_anytls_node() {
-    local index="$1" tag name server port password old_dir old_provider_tag provider_tag provider_dir provider_new disable_http disable_tls alternative_http_port choice value
-    local old_provider_object replace_provider replace_inline ignore_ports other_refs
-    tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
-    reset_acme_state
-    while true; do
-        reset_acme_state
-        name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
-        server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE")
-        port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE")
-        password=$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")
-        old_dir=$(jq -r --argjson i "$index" '.nodes[$i].acme_dir // empty' "$META_FILE")
-        provider_tag=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.certificate_provider | if type=="string" then . else empty end' "$CONFIG_FILE")
-        old_provider_tag="$provider_tag"
-        if [[ -n "$provider_tag" ]]; then
-            old_provider_object=$(jq -c --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag)' "$CONFIG_FILE" 2>/dev/null || true)
-            provider_dir=$(jq -r --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag) | .data_directory // empty' "$CONFIG_FILE")
-            [[ -n "$old_dir" ]] || old_dir="$provider_dir"
-            disable_http=$(jq -r --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag) | .disable_http_challenge // false' "$CONFIG_FILE")
-            disable_tls=$(jq -r --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag) | .disable_tls_alpn_challenge // false' "$CONFIG_FILE")
-            alternative_http_port=$(jq -r --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag) | .alternative_http_port // 0' "$CONFIG_FILE")
-            provider_new=0
-        else
-            old_provider_object=$(jq -c --arg tag "$tag" '.inbounds[]? | select(.tag==$tag) | .tls.certificate_provider | select(type=="object")' "$CONFIG_FILE" 2>/dev/null || true)
-            provider_dir="$old_dir"
-            disable_http=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.certificate_provider.disable_http_challenge // false' "$CONFIG_FILE")
-            disable_tls=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.certificate_provider.disable_tls_alpn_challenge // false' "$CONFIG_FILE")
-            alternative_http_port=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.certificate_provider.alternative_http_port // 0' "$CONFIG_FILE")
-            provider_new=1
-        fi
-        printf '\n  当前节点: %s%s%s (anytls) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
-        printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改服务器公网 IP\n  %s[3]%s 修改监听端口\n  %s[4]%s 重新生成密码\n  %s[0]%s 返回\n' "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
-        read_input choice '  请选择修改项: ' || return 1
-        case "$choice" in
-            0) return 0 ;;
-            1)
-                read_input value "  请输入新节点名称 (回车保持 $name): " || return 1; value=${value:-$name}; valid_name "$value" || { fail '节点名称无效'; continue; }
-                printf '  节点名称：%s\n' "$value"; [[ "$value" == "$name" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }
-                if [[ -z "$provider_tag" ]]; then prepare_acme_provider "$server" "$tag" "$tag" || { cleanup_new_acme_dir; continue; }; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
-                validate_anytls_acme_port "$port" "$disable_http" "$disable_tls" "$alternative_http_port" || { cleanup_new_acme_dir; continue; }
-                confirm_node_update || { cleanup_new_acme_dir; (( MENU_CANCELLED )) && return 1; continue; }
-                apply_anytls_node_update "$tag" "$value" "$server" "$port" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" "$ACME_PROVIDER_OBJECT" || { cleanup_new_acme_dir; return 1; }; reset_acme_state; pause_enter '  按回车返回修改节点菜单...';;
-            2)
-                read_input value "  请输入新的服务器公网 IP (回车保持 $server): " || return 1; value=${value:-$server}; valid_ip_literal "$value" || { fail '服务器地址必须是 IPv4 或 IPv6 地址'; continue; }
-                printf '  服务器公网 IP：%s\n' "$value"; [[ "$value" == "$server" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }
-                replace_provider=''; replace_inline=''; ignore_ports=''
-                if [[ -n "$old_provider_tag" ]]; then
-                    other_refs=$(jq -r --arg provider "$old_provider_tag" --arg tag "$tag" '[.inbounds[]? | select(.tag != $tag and .tls.certificate_provider == $provider)] | length' "$CONFIG_FILE" 2>/dev/null || printf '1')
-                    if [[ "$other_refs" == 0 ]]; then replace_provider="$old_provider_tag"; ignore_ports=$(acme_provider_ports "$old_provider_object"); fi
-                elif [[ -n "$old_provider_object" ]]; then
-                    other_refs=$(jq -r --arg tag "$tag" --argjson provider "$old_provider_object" '[.inbounds[]? | select(.tag != $tag and ((.tls.certificate_provider | type) == "object") and .tls.certificate_provider == $provider)] | length' "$CONFIG_FILE" 2>/dev/null || printf '1')
-                    if [[ "$other_refs" == 0 ]]; then replace_inline="$tag"; ignore_ports=$(acme_provider_ports "$old_provider_object"); fi
-                fi
-                prepare_acme_provider "$value" "$tag" "$replace_inline" "$replace_provider" "$ignore_ports" || { cleanup_new_acme_dir; continue; }; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"
-                validate_anytls_acme_port "$port" "$disable_http" "$disable_tls" "$alternative_http_port" || { cleanup_new_acme_dir; continue; }
-                confirm_node_update || { cleanup_new_acme_dir; (( MENU_CANCELLED )) && return 1; continue; }
-                apply_anytls_node_update "$tag" "$name" "$value" "$port" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" "$ACME_PROVIDER_OBJECT" || { cleanup_new_acme_dir; return 1; }; reset_acme_state; pause_enter '  按回车返回修改节点菜单...';;
-            3)
-                read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1; value=${value:-$port}; valid_port "$value" || { fail '端口应为 1–65535'; continue; }; value=$((10#$value));
-                if (( value != port )) && port_conflict "$value" "$tag" tcp; then fail "TCP 端口 $value 已被占用"; continue; fi
-                printf '  监听端口：%s\n' "$value"; (( value == port )) && { pause_enter '  按回车返回修改节点菜单...'; continue; }
-                if [[ -z "$provider_tag" ]]; then prepare_acme_provider "$server" "$tag" "$tag" || { cleanup_new_acme_dir; continue; }; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
-                validate_anytls_acme_port "$value" "$disable_http" "$disable_tls" "$alternative_http_port" || { cleanup_new_acme_dir; continue; }
-                confirm_node_update || { cleanup_new_acme_dir; (( MENU_CANCELLED )) && return 1; continue; }
-                apply_anytls_node_update "$tag" "$name" "$server" "$value" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" "$ACME_PROVIDER_OBJECT" || { cleanup_new_acme_dir; return 1; }; reset_acme_state; pause_enter '  按回车返回修改节点菜单...';;
-            4)
-                value=$("$SINGBOX_BIN" generate rand --hex 32 2>/dev/null) || { fail '生成 AnyTLS 密码失败'; continue; }; [[ "$value" =~ ^[0-9a-fA-F]{64}$ ]] || { fail '生成 AnyTLS 密码格式无效'; continue; }
-                printf '  密码：%s\n' "$value"; confirm_node_update || { cleanup_new_acme_dir; (( MENU_CANCELLED )) && return 1; continue; }
-                if [[ -z "$provider_tag" ]]; then prepare_acme_provider "$server" "$tag" "$tag" || { cleanup_new_acme_dir; continue; }; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
-                validate_anytls_acme_port "$port" "$disable_http" "$disable_tls" "$alternative_http_port" || { cleanup_new_acme_dir; continue; }
-                apply_anytls_node_update "$tag" "$name" "$server" "$port" "$value" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" "$ACME_PROVIDER_OBJECT" || { cleanup_new_acme_dir; return 1; }; reset_acme_state; pause_enter '  按回车返回修改节点菜单...';;
-            *) fail '无效选择' ;;
-        esac
-    done
-}
-
 apply_ss2022_node_update() {
     local tag="$1" name="$2" server="$3" port="$4" password="$5" method="$SS2022_METHOD"
     local new_config new_meta count config_matches meta_matches
@@ -1291,35 +925,24 @@ modify_node() {
     protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
     case "$protocol" in
         vless-reality) modify_vless_node "$index" ;;
-        anytls) require_anytls_core || return 1; modify_anytls_node "$index" ;;
         ss2022) modify_ss2022_node "$index" ;;
         *) fail '节点协议不受支持'; return 1 ;;
     esac
 }
 
 delete_node() {
-    local index tag name answer new_config new_meta count protocol acme_dir provider_tag
+    local index tag name answer new_config new_meta count
     choose_node index || return 1
-    tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE"); name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
-    protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
-    acme_dir=$(jq -r --argjson i "$index" '.nodes[$i].acme_dir // empty' "$META_FILE")
-    provider_tag=$(jq -r --arg tag "$tag" '.inbounds[]? | select(.tag==$tag) | .tls.certificate_provider | if type=="string" then . else empty end' "$CONFIG_FILE")
-    if [[ -z "$acme_dir" && -n "$provider_tag" ]]; then
-        acme_dir=$(jq -r --arg provider "$provider_tag" '.certificate_providers[]? | select(.tag==$provider) | .data_directory // empty' "$CONFIG_FILE")
-    fi
+    tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
+    name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
     read_input answer "  确认删除节点 [$name]？(Y/N): " || return 1
     [[ "$answer" == [yY] ]] || return 1
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
-    jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" > "$new_config" || return 1
-    jq --arg tag "$tag" 'del(.nodes[] | select(.tag==$tag))' "$META_FILE" > "$new_meta" || return 1
-    if [[ -n "$provider_tag" ]]; then
-        jq --arg provider "$provider_tag" '. as $root | if any($root.inbounds[]?; .tls.certificate_provider==$provider) then . else .certificate_providers |= map(select(.tag != $provider)) end' "$new_config" > "${new_config}.clean" && mv -f "${new_config}.clean" "$new_config" || { rm -f "$new_config" "${new_config}.clean" "$new_meta"; return 1; }
-    fi
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
+    jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq --arg tag "$tag" 'del(.nodes[] | select(.tag==$tag))' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
     count=$(node_count); count=$((count - 1))
     if apply_transaction "$new_config" "$new_meta" "$count"; then
-        if [[ "$protocol" == anytls && -n "$acme_dir" && "$acme_dir" == "$ACME_DIR/"* ]]; then
-            acme_dir_reference_state "$acme_dir"; [[ $? -eq 1 ]] && rm -rf -- "$acme_dir"
-        fi
         success "节点 [$name] 已删除"
     else
         rm -f "$new_config" "$new_meta"
@@ -1328,27 +951,21 @@ delete_node() {
 }
 
 clear_nodes() {
-    local count answer new_config new_meta dir status
+    local count answer new_config new_meta
     count=$(node_count); (( count > 0 )) || { warn '暂无节点'; return 0; }
     read_input answer "  确认清空全部 $count 个节点？(Y/N): " || return 1
     [[ "$answer" == [yY] ]] || return 1
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
-    jq '.inbounds=[] | del(.certificate_providers)' "$CONFIG_FILE" > "$new_config" || return 1; jq '.nodes=[]' "$META_FILE" > "$new_meta" || return 1
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
+    jq '.inbounds=[]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq '.nodes=[]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
     if apply_transaction "$new_config" "$new_meta" 0; then
-        if [[ -d "$ACME_DIR" ]]; then
-            for dir in "$ACME_DIR"/*; do
-                [[ -d "$dir" ]] || continue
-                acme_dir_reference_state "$dir"; status=$?
-                (( status == 1 )) && rm -rf -- "$dir"
-            done
-        fi
         success '所有节点已清空'
     else
         rm -f "$new_config" "$new_meta"
         return 1
     fi
 }
-
 start_service() {
     (( $(node_count) > 0 )) || { warn '暂无节点，无法启动 sing-box'; return 1; }
     require_core || return 1; write_service_unit || return 1
