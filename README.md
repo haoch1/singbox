@@ -7,6 +7,8 @@
 ## 功能
 
 - VLESS 默认监听端口 `8443`，默认伪装域名 `www.bing.com`
+- AnyTLS 默认监听端口 `8443`
+- Shadowsocks 2022 默认监听端口 `8388`
 - AnyTLS 使用 sing-box 原生 ACME IP 证书，需要 sing-box `1.14.0` 或更高版本
 - Shadowsocks 2022 固定使用 `2022-blake3-aes-128-gcm`
 - 自动生成协议凭据并输出对应节点链接
