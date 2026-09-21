@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.1.3"
+SCRIPT_VERSION="1.1.4"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -634,10 +634,9 @@ build_anytls_link() {
 }
 
 build_ss2022_link() {
-    local server="$1" port="$2" password="$3" name="$4" host userinfo
+    local server="$1" port="$2" password="$3" name="$4" host
     host=$(format_server_for_uri "$server")
-    userinfo=$(printf '%s' "$SS2022_METHOD:$password" | base64 | tr '+/' '-_' | tr -d '=\r\n')
-    printf 'ss://%s@%s:%s#%s' "$userinfo" "$host" "$port" "$(uri_escape "$name")"
+    printf 'ss://%s:%s@%s:%s#%s' "$SS2022_METHOD" "$(uri_escape "$password")" "$host" "$port" "$(uri_escape "$name")"
 }
 
 build_node_link() {
