@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.0.7"
+SCRIPT_VERSION="1.1.0"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -25,7 +25,10 @@ SYSTEMD_STARTUP="/etc/systemd/system/multi-user.target.wants/sing-box.service"
 OPENRC_UNIT="/etc/init.d/sing-box"
 OPENRC_STARTUP="/etc/runlevels/default/sing-box"
 DEFAULT_PORT=8443
+DEFAULT_SS_PORT=8388
 DEFAULT_SNI="www.bing.com"
+ACME_DIR="$SINGBOX_DIR/acme"
+SS2022_METHOD="2022-blake3-aes-128-gcm"
 INIT_SYSTEM="direct"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
@@ -191,7 +194,7 @@ install_packages() {
 }
 
 ensure_dependencies() {
-    local required=(curl jq tar sha256sum flock ss timeout)
+    local required=(curl jq tar sha256sum flock ss timeout base64)
     local missing=0 cmd
     for cmd in "${required[@]}"; do command -v "$cmd" >/dev/null 2>&1 || missing=1; done
     (( missing == 0 )) || install_packages || return 1
@@ -250,7 +253,7 @@ svc_disable() {
 svc_start() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
-        systemd) systemctl start sing-box >/dev/null 2>&1 9>&- ;;
+        systemd) systemctl start sing-box >/dev/null 2>&1 9>&- && svc_active ;;
         openrc)
             rc-service sing-box start >/dev/null 2>&1 9>&- || return 1
             svc_active
@@ -283,7 +286,7 @@ svc_stop() {
 svc_restart() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
-        systemd) systemctl restart sing-box >/dev/null 2>&1 9>&- ;;
+        systemd) systemctl restart sing-box >/dev/null 2>&1 9>&- && svc_active ;;
         openrc)
             rc-service sing-box restart >/dev/null 2>&1 9>&- || return 1
             svc_active
@@ -318,6 +321,25 @@ get_url() {
 valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 valid_text() { [[ -n "$1" && "$1" != *[[:space:]/\\]* && "$1" != *[[:cntrl:]]* ]]; }
 valid_name() { [[ -n "$1" && ${#1} -le 80 && "$1" != *[[:cntrl:]]* ]]; }
+
+valid_ip_literal() {
+    local value="$1" part count=0
+    if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        IFS='.' read -r -a parts <<< "$value"
+        for part in "${parts[@]}"; do (( 10#$part <= 255 )) || return 1; done
+        return 0
+    fi
+    [[ "$value" == *:* && "$value" =~ ^[0-9a-fA-F:.]+$ ]] || return 1
+    [[ "$value" != *:::* ]] || return 1
+    [[ "$value" != *.* ]] || return 1
+    IFS=':' read -r -a parts <<< "$value"
+    for part in "${parts[@]}"; do
+        [[ -z "$part" || "$part" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+        [[ -n "$part" ]] && count=$((count + 1))
+    done
+    (( count >= 1 && count <= 8 )) || return 1
+    if [[ "$value" != *::* ]]; then (( count == 8 )) || return 1; fi
+}
 
 uri_escape() { printf '%s' "$1" | jq -sRr @uri; }
 
@@ -369,13 +391,56 @@ init_state() {
 node_count() { jq -r '.nodes | length' "$META_FILE"; }
 
 port_conflict() {
-    local port="$1" exclude="${2:-}"
+    local port="$1" exclude="${2:-}" mode="${3:-tcp}"
     jq -e --argjson p "$port" --arg e "$exclude" '.nodes[]? | select((.port|tonumber) == $p and ($e == "" or (.tag // "") != $e))' "$META_FILE" >/dev/null 2>&1 && return 0
     jq -e --argjson p "$port" --arg e "$exclude" '.inbounds[]? | select((.listen_port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))' "$CONFIG_FILE" >/dev/null 2>&1 && return 0
     if command -v ss >/dev/null 2>&1; then
         ss -H -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
+        if [[ "$mode" == tcp_udp ]]; then
+            ss -H -lun 2>/dev/null | awk -v p=":$port" '$5 ~ p"$" || $4 ~ p"$" {found=1} END {exit !found}' && return 0
+        fi
     fi
     return 1
+}
+
+core_version_number() {
+    local output
+    output=$("$SINGBOX_BIN" version 2>/dev/null || true)
+    awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output"
+}
+
+version_at_least() {
+    local current="$1" required="$2" current_part required_part index
+    IFS='.' read -r -a current_parts <<< "${current%%-*}"
+    IFS='.' read -r -a required_parts <<< "$required"
+    for index in 0 1 2; do
+        current_part=${current_parts[$index]:-0}; required_part=${required_parts[$index]:-0}
+        [[ "$current_part" =~ ^[0-9]+$ && "$required_part" =~ ^[0-9]+$ ]] || return 1
+        (( 10#$current_part > 10#$required_part )) && return 0
+        (( 10#$current_part < 10#$required_part )) && return 1
+    done
+    return 0
+}
+
+require_anytls_core() {
+    local version
+    require_core || return 1
+    version=$(core_version_number)
+    version_at_least "$version" 1.14.0 || { warn 'AnyTLS 需要 sing-box 1.14.0 或更高版本，请先执行菜单 [9] 安装/更新核心'; return 1; }
+}
+
+select_acme_challenge() {
+    local exclude="${1:-}"
+    if ! port_conflict 80 "$exclude" tcp; then
+        ACME_DISABLE_HTTP=false
+        ACME_DISABLE_TLS=true
+    elif ! port_conflict 443 "$exclude" tcp; then
+        ACME_DISABLE_HTTP=true
+        ACME_DISABLE_TLS=false
+    else
+        fail 'AnyTLS IP 证书需要 TCP 80 或 443 完成 ACME 验证'
+        return 1
+    fi
 }
 
 generate_credentials() {
@@ -387,11 +452,44 @@ generate_credentials() {
     [[ -n "$NEW_UUID" && -n "$NEW_PRIVATE" && -n "$NEW_PUBLIC" && "$NEW_SHORT_ID" =~ ^[0-9a-fA-F]{1,16}$ ]]
 }
 
-build_link() {
+build_vless_link() {
     local server="$1" port="$2" uuid="$3" sni="$4" public="$5" sid="$6" name="$7"
     local host; host=$(format_server_for_uri "$server")
     printf 'vless://%s@%s:%s?security=reality&encryption=none&pbk=%s&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=%s&sid=%s#%s' \
         "$uuid" "$host" "$port" "$(uri_escape "$public")" "$(uri_escape "$sni")" "$sid" "$(uri_escape "$name")"
+}
+
+build_anytls_link() {
+    local server="$1" port="$2" password="$3" name="$4" host
+    host=$(format_server_for_uri "$server")
+    printf 'anytls://%s@%s:%s/?sni=%s#%s' "$(uri_escape "$password")" "$host" "$port" "$(uri_escape "$server")" "$(uri_escape "$name")"
+}
+
+build_ss2022_link() {
+    local server="$1" port="$2" password="$3" name="$4" host userinfo
+    host=$(format_server_for_uri "$server")
+    userinfo=$(printf '%s' "$SS2022_METHOD:$password" | base64 | tr '+/' '-_' | tr -d '=\r\n')
+    printf 'ss://%s@%s:%s#%s' "$userinfo" "$host" "$port" "$(uri_escape "$name")"
+}
+
+build_node_link() {
+    local index="$1" protocol server port name
+    protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
+    server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE")
+    port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE")
+    name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
+    case "$protocol" in
+        vless-reality)
+            build_vless_link "$server" "$port" \
+                "$(jq -r --argjson i "$index" '.nodes[$i].uuid' "$META_FILE")" \
+                "$(jq -r --argjson i "$index" '.nodes[$i].sni' "$META_FILE")" \
+                "$(jq -r --argjson i "$index" '.nodes[$i].public_key' "$META_FILE")" \
+                "$(jq -r --argjson i "$index" '.nodes[$i].short_id' "$META_FILE")" "$name"
+            ;;
+        anytls) build_anytls_link "$server" "$port" "$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")" "$name" ;;
+        ss2022) build_ss2022_link "$server" "$port" "$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")" "$name" ;;
+        *) return 1 ;;
+    esac
 }
 
 check_config() {
@@ -520,7 +618,7 @@ require_core() {
     [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'; return 1; }
 }
 
-add_node() {
+add_vless_node() {
     require_core || return 1
     local server port sni name id tag uuid private public sid current_count
     server=$(server_ip_guess)
@@ -556,20 +654,121 @@ add_node() {
     jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
         '.inbounds += [{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$private,short_id:[$sid]}}}]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
     jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
-        '.nodes += [{id:$id,tag:$tag,name:$name,server:$server,port:$port,sni:$sni,uuid:$uuid,public_key:$public,short_id:$sid}]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
+        '.nodes += [{protocol:"vless-reality",id:$id,tag:$tag,name:$name,server:$server,port:$port,sni:$sni,uuid:$uuid,public_key:$public,short_id:$sid}]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
     current_count=$(node_count); current_count=$((current_count + 1))
     if apply_transaction "$new_config" "$new_meta" "$current_count"; then
         success "节点 [$name] 添加成功"
-        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
     else
         rm -f "$new_config" "$new_meta"; return 1
     fi
 }
 
+add_anytls_node() {
+    require_anytls_core || return 1
+    local server port name id tag password acme_dir current_count new_config new_meta
+    server=$(server_ip_guess)
+    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
+    server=${server:-$(server_ip_guess)}
+    while ! valid_ip_literal "$server"; do
+        fail 'AnyTLS 服务器地址必须是 IPv4 或 IPv6 地址'; read_input server '  服务器地址: ' || return 1
+    done
+    port="$DEFAULT_PORT"
+    while true; do
+        read_input port "  监听端口 (默认 $DEFAULT_PORT): " || return 1
+        port=${port:-$DEFAULT_PORT}
+        valid_port "$port" || { fail '端口应为 1–65535'; continue; }
+        port=$((10#$port))
+        port_conflict "$port" tcp && { fail "TCP 端口 $port 已被占用"; continue; }
+        break
+    done
+    name="AnyTLS-$port"
+    read_input name "  节点名称 (默认 $name): " || return 1
+    name=${name:-"AnyTLS-$port"}
+    valid_name "$name" || { fail '节点名称不能为空、不能超过 80 字或包含控制字符'; return 1; }
+    select_acme_challenge || return 1
+    password=$("$SINGBOX_BIN" generate rand --hex 32 2>/dev/null) || { fail '生成 AnyTLS 密码失败'; return 1; }
+    [[ "$password" =~ ^[0-9a-fA-F]{64}$ ]] || { fail '生成 AnyTLS 密码格式无效'; return 1; }
+    id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null || printf '%s' "$(date +%s%N)")
+    tag="anytls-in-$id"
+    acme_dir="$ACME_DIR/$id"
+    mkdir -p "$acme_dir" && chmod 700 "$acme_dir" || { fail '创建 AnyTLS 证书目录失败'; return 1; }
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || { rm -rf "$acme_dir"; return 1; }
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; rm -rf "$acme_dir"; return 1; }
+    jq --arg tag "$tag" --arg server "$server" --arg dir "$acme_dir" --arg password "$password" --argjson port "$port" \
+        --argjson disable_http "$ACME_DISABLE_HTTP" --argjson disable_tls "$ACME_DISABLE_TLS" \
+        '.inbounds += [{type:"anytls",tag:$tag,listen:"::",listen_port:$port,users:[{name:"default",password:$password}],tls:{enabled:true,certificate_provider:{type:"acme",domain:[$server],default_server_name:$server,provider:"letsencrypt",profile:"shortlived",key_type:"p256",data_directory:$dir,disable_http_challenge:$disable_http,disable_tls_alpn_challenge:$disable_tls}}}]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; rm -rf "$acme_dir"; return 1; }
+    jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --arg dir "$acme_dir" --argjson port "$port" \
+        '.nodes += [{protocol:"anytls",id:$id,tag:$tag,name:$name,server:$server,port:$port,password:$password,acme_dir:$dir}]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; rm -rf "$acme_dir"; return 1; }
+    current_count=$(node_count); current_count=$((current_count + 1))
+    if apply_transaction "$new_config" "$new_meta" "$current_count"; then
+        success "节点 [$name] 添加成功"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_anytls_link "$server" "$port" "$password" "$name")" "$NC"
+    else
+        rm -f "$new_config" "$new_meta"; rm -rf "$acme_dir"; return 1
+    fi
+}
+
+add_ss2022_node() {
+    require_core || return 1
+    local server port name id tag password current_count new_config new_meta
+    server=$(server_ip_guess)
+    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
+    server=${server:-$(server_ip_guess)}
+    while [[ -z "$server" ]] || ! valid_text "$server"; do
+        fail '请输入有效的 IP 或域名'; read_input server '  服务器地址: ' || return 1
+    done
+    port="$DEFAULT_SS_PORT"
+    while true; do
+        read_input port "  监听端口 (默认 $DEFAULT_SS_PORT): " || return 1
+        port=${port:-$DEFAULT_SS_PORT}
+        valid_port "$port" || { fail '端口应为 1–65535'; continue; }
+        port=$((10#$port))
+        port_conflict "$port" tcp_udp && { fail "TCP/UDP 端口 $port 已被占用"; continue; }
+        break
+    done
+    name="SS2022-$port"
+    read_input name "  节点名称 (默认 $name): " || return 1
+    name=${name:-"SS2022-$port"}
+    valid_name "$name" || { fail '节点名称不能为空、不能超过 80 字或包含控制字符'; return 1; }
+    password=$("$SINGBOX_BIN" generate rand --base64 16 2>/dev/null) || { fail '生成 Shadowsocks 2022 密码失败'; return 1; }
+    [[ -n "$password" ]] || { fail '生成 Shadowsocks 2022 密码失败'; return 1; }
+    id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null || printf '%s' "$(date +%s%N)")
+    tag="ss-in-$id"
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
+    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" \
+        '.inbounds += [{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" \
+        '.nodes += [{protocol:"ss2022",id:$id,tag:$tag,name:$name,server:$server,port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
+    current_count=$(node_count); current_count=$((current_count + 1))
+    if apply_transaction "$new_config" "$new_meta" "$current_count"; then
+        success "节点 [$name] 添加成功"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_ss2022_link "$server" "$port" "$password" "$name")" "$NC"
+    else
+        rm -f "$new_config" "$new_meta"; return 1
+    fi
+}
+
+add_node() {
+    local protocol
+    require_core || return 1
+    printf '\n  请选择协议:\n\n  %s[1]%s VLESS + Reality + Vision\n  %s[2]%s AnyTLS\n  %s[3]%s Shadowsocks 2022\n  %s[0]%s 返回\n' \
+        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+    read_input protocol '  请选择协议: ' || return 1
+    case "$protocol" in
+        1) add_vless_node ;;
+        2) add_anytls_node ;;
+        3) add_ss2022_node ;;
+        0|'') return 0 ;;
+        *) fail '无效选择'; return 1 ;;
+    esac
+}
+
 print_nodes() {
-    jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.port|tostring)] | @tsv' "$META_FILE" | \
-        while IFS=$'\t' read -r index name port; do
-            printf '  %s[%s]%s %s (vless-reality) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$BLUE" "$port" "$NC"
+    jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE" | \
+        while IFS=$'\t' read -r index name protocol port; do
+            printf '  %s[%s]%s %s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$protocol" "$BLUE" "$port" "$NC"
         done
 }
 
@@ -587,14 +786,14 @@ view_nodes() {
     local count; count=$(node_count)
     printf '\n'; info "=== 当前节点信息（共 ${count} 个） ==="; printf '\n'
     (( count > 0 )) || { warn '暂无节点'; return 0; }
-    while IFS=$'\t' read -r index name server port sni uuid public sid; do
-        printf '  %s[%s]%s %s%s%s (vless-reality) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
-        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
+    while IFS=$'\t' read -r index name protocol port; do
+        printf '  %s[%s]%s %s%s%s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$((index - 1))")" "$NC"
         printf '\n'
-    done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,.value.server,(.value.port|tostring),.value.sni,.value.uuid,.value.public_key,.value.short_id] | @tsv' "$META_FILE")
+    done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE")
 }
 
-apply_node_update() {
+apply_vless_node_update() {
     local index="$1" tag="$2" name="$3" server="$4" port="$5" sni="$6" uuid="$7" public="$8" sid="$9" private="${10}"
     local new_config new_meta count config_matches meta_matches
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
@@ -609,7 +808,7 @@ apply_node_update() {
     jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
         '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
     jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
-        '(.nodes[] | select(.tag==$tag)) |= (.name=$name | .server=$server | .port=$port | .sni=$sni | .uuid=$uuid | .public_key=$public | .short_id=$sid)' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
+        '(.nodes[] | select(.tag==$tag)) |= (.protocol=(.protocol // "vless-reality") | .name=$name | .server=$server | .port=$port | .sni=$sni | .uuid=$uuid | .public_key=$public | .short_id=$sid)' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
     if ! jq -e --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
         'any(.inbounds[]?; .tag==$tag and (.listen_port|tonumber?)==$port and .users[0].uuid==$uuid and .tls.server_name==$sni and .tls.reality.handshake.server==$sni and .tls.reality.private_key==$private and ((.tls.reality.short_id // []) | index($sid)) != null)' "$new_config" >/dev/null 2>&1; then
         rm -f "$new_config" "$new_meta"
@@ -625,7 +824,7 @@ apply_node_update() {
     count=$(node_count)
     if apply_transaction "$new_config" "$new_meta" "$count"; then
         success "节点 [$name] 修改成功"
-        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
     else rm -f "$new_config" "$new_meta"; return 1; fi
 }
 
@@ -636,10 +835,8 @@ confirm_node_update() {
     return 0
 }
 
-modify_node() {
-    local index tag name server port sni uuid public sid private choice value
-    require_core || return 1
-    choose_node index || return 1
+modify_vless_node() {
+    local index="$1" tag name server port sni uuid public sid private choice value
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
         name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
@@ -670,7 +867,7 @@ modify_node() {
                     continue
                 fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
-                apply_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
+                apply_vless_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
@@ -688,7 +885,7 @@ modify_node() {
                     continue
                 fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
-                apply_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
+                apply_vless_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
@@ -711,7 +908,7 @@ modify_node() {
                     continue
                 fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
-                apply_node_update "$index" "$tag" "$name" "$server" "$value" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
+                apply_vless_node_update "$index" "$tag" "$name" "$server" "$value" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
@@ -728,7 +925,7 @@ modify_node() {
                     continue
                 fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
-                apply_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$value" "$public" "$sid" "$private" || return 1
+                apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$value" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
@@ -746,7 +943,7 @@ modify_node() {
                     continue
                 fi
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
-                apply_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
+                apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
@@ -755,7 +952,7 @@ modify_node() {
                 printf '  Reality 私钥：%s\n  Reality 公钥：%s\n  Short ID：%s\n' \
                     "$NEW_PRIVATE" "$NEW_PUBLIC" "$NEW_SHORT_ID"
                 confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
-                apply_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$uuid" "$NEW_PUBLIC" "$NEW_SHORT_ID" "$NEW_PRIVATE" || return 1
+                apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$uuid" "$NEW_PUBLIC" "$NEW_SHORT_ID" "$NEW_PRIVATE" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
@@ -764,17 +961,158 @@ modify_node() {
     done
 }
 
+apply_anytls_node_update() {
+    local tag="$1" name="$2" server="$3" port="$4" password="$5" acme_dir="$6" disable_http="$7" disable_tls="$8"
+    local new_config new_meta count config_matches meta_matches acme_backup='' acme_created=0
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
+    config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE" 2>/dev/null) || { rm -f "$new_config" "$new_meta"; fail '目标节点配置读取失败'; return 1; }
+    meta_matches=$(jq -r --arg tag "$tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE" 2>/dev/null) || { rm -f "$new_config" "$new_meta"; fail '目标节点元数据读取失败'; return 1; }
+    if [[ "$config_matches" != 1 || "$meta_matches" != 1 ]]; then
+        rm -f "$new_config" "$new_meta"; fail '目标节点信息不一致，未应用修改，请重新进入菜单'; return 1
+    fi
+    jq --arg tag "$tag" --arg server "$server" --arg dir "$acme_dir" --arg password "$password" --argjson port "$port" \
+        --argjson disable_http "$disable_http" --argjson disable_tls "$disable_tls" \
+        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].password=$password | .tls.enabled=true | .tls.certificate_provider.type="acme" | .tls.certificate_provider.domain=[$server] | .tls.certificate_provider.default_server_name=$server | .tls.certificate_provider.provider="letsencrypt" | .tls.certificate_provider.profile="shortlived" | .tls.certificate_provider.key_type="p256" | .tls.certificate_provider.data_directory=$dir | .tls.certificate_provider.disable_http_challenge=$disable_http | .tls.certificate_provider.disable_tls_alpn_challenge=$disable_tls)' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --arg dir "$acme_dir" --argjson port "$port" \
+        '(.nodes[] | select(.tag==$tag)) |= (.protocol="anytls" | .name=$name | .server=$server | .port=$port | .password=$password | .acme_dir=$dir)' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq -e --arg tag "$tag" --arg server "$server" --arg dir "$acme_dir" --arg password "$password" --argjson port "$port" \
+        'any(.inbounds[]?; .tag==$tag and .type=="anytls" and (.listen_port|tonumber?)==$port and .users[0].password==$password and .tls.certificate_provider.domain==[$server] and .tls.certificate_provider.default_server_name==$server and .tls.certificate_provider.data_directory==$dir)' "$new_config" >/dev/null 2>&1 || { rm -f "$new_config" "$new_meta"; fail 'AnyTLS 配置修改结果校验失败'; return 1; }
+    jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --arg dir "$acme_dir" --argjson port "$port" \
+        'any(.nodes[]?; .tag==$tag and (.protocol // "vless-reality")=="anytls" and .name==$name and .server==$server and (.port|tonumber?)==$port and .password==$password and .acme_dir==$dir)' "$new_meta" >/dev/null 2>&1 || { rm -f "$new_config" "$new_meta"; fail 'AnyTLS 元数据修改结果校验失败'; return 1; }
+    if [[ ! -d "$acme_dir" ]]; then
+        mkdir -p "$acme_dir" && chmod 700 "$acme_dir" || { rm -f "$new_config" "$new_meta"; fail '创建 AnyTLS 证书目录失败'; return 1; }
+        acme_created=1
+    fi
+    if [[ -d "$acme_dir" ]]; then
+        acme_backup=$(mktemp -d "$SINGBOX_DIR/.transaction.XXXXXX") || { rm -f "$new_config" "$new_meta"; (( acme_created )) && rm -rf "$acme_dir"; return 1; }
+        cp -a "$acme_dir/." "$acme_backup/" 2>/dev/null || { rm -rf "$acme_backup" "$new_config" "$new_meta"; (( acme_created )) && rm -rf "$acme_dir"; return 1; }
+    fi
+    count=$(node_count)
+    if apply_transaction "$new_config" "$new_meta" "$count"; then
+        [[ -n "$acme_backup" ]] && rm -rf "$acme_backup"
+        success "节点 [$name] 修改成功"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_anytls_link "$server" "$port" "$password" "$name")" "$NC"
+    else
+        rm -f "$new_config" "$new_meta"
+        if [[ -n "$acme_backup" ]]; then
+            rm -rf "$acme_dir"; mkdir -p "$acme_dir"; cp -a "$acme_backup/." "$acme_dir/" 2>/dev/null || true; rm -rf "$acme_backup"
+        elif (( acme_created )); then
+            rm -rf "$acme_dir"
+        fi
+        return 1
+    fi
+}
+
+modify_anytls_node() {
+    local index="$1" tag name server port password acme_dir disable_http disable_tls choice value
+    tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
+    while true; do
+        name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
+        server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE")
+        port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE")
+        password=$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")
+        acme_dir=$(jq -r --argjson i "$index" --arg default_dir "$ACME_DIR" '.nodes[$i].acme_dir // $default_dir' "$META_FILE")
+        disable_http=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.certificate_provider.disable_http_challenge // false' "$CONFIG_FILE")
+        disable_tls=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.certificate_provider.disable_tls_alpn_challenge // false' "$CONFIG_FILE")
+        printf '\n  当前节点: %s%s%s (anytls) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
+        printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改服务器公网 IP\n  %s[3]%s 修改监听端口\n  %s[4]%s 重新生成密码\n  %s[0]%s 返回\n' "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+        read_input choice '  请选择修改项: ' || return 1
+        case "$choice" in
+            0) return 0 ;;
+            1)
+                read_input value "  请输入新节点名称 (回车保持 $name): " || return 1; value=${value:-$name}; valid_name "$value" || { fail '节点名称无效'; continue; }
+                printf '  节点名称：%s\n' "$value"; [[ "$value" == "$name" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }
+                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                apply_anytls_node_update "$tag" "$value" "$server" "$port" "$password" "$acme_dir" "$disable_http" "$disable_tls" || return 1; pause_enter '  按回车返回修改节点菜单...';;
+            2)
+                read_input value "  请输入新的服务器公网 IP (回车保持 $server): " || return 1; value=${value:-$server}; valid_ip_literal "$value" || { fail '服务器地址必须是 IPv4 或 IPv6 地址'; continue; }
+                printf '  服务器公网 IP：%s\n' "$value"; [[ "$value" == "$server" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }
+                select_acme_challenge "$tag" || continue
+                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                apply_anytls_node_update "$tag" "$name" "$value" "$port" "$password" "$acme_dir" "$ACME_DISABLE_HTTP" "$ACME_DISABLE_TLS" || return 1; pause_enter '  按回车返回修改节点菜单...';;
+            3)
+                read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1; value=${value:-$port}; valid_port "$value" || { fail '端口应为 1–65535'; continue; }; value=$((10#$value));
+                if (( value != port )) && port_conflict "$value" "$tag" tcp; then fail "TCP 端口 $value 已被占用"; continue; fi
+                printf '  监听端口：%s\n' "$value"; (( value == port )) && { pause_enter '  按回车返回修改节点菜单...'; continue; }
+                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                apply_anytls_node_update "$tag" "$name" "$server" "$value" "$password" "$acme_dir" "$disable_http" "$disable_tls" || return 1; pause_enter '  按回车返回修改节点菜单...';;
+            4)
+                value=$("$SINGBOX_BIN" generate rand --hex 32 2>/dev/null) || { fail '生成 AnyTLS 密码失败'; continue; }; [[ "$value" =~ ^[0-9a-fA-F]{64}$ ]] || { fail '生成 AnyTLS 密码格式无效'; continue; }
+                printf '  密码：%s\n' "$value"; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                apply_anytls_node_update "$tag" "$name" "$server" "$port" "$value" "$acme_dir" "$disable_http" "$disable_tls" || return 1; pause_enter '  按回车返回修改节点菜单...';;
+            *) fail '无效选择' ;;
+        esac
+    done
+}
+
+apply_ss2022_node_update() {
+    local tag="$1" name="$2" server="$3" port="$4" password="$5" method="$SS2022_METHOD"
+    local new_config new_meta count config_matches meta_matches
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
+    config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE") || { rm -f "$new_config" "$new_meta"; return 1; }
+    meta_matches=$(jq -r --arg tag "$tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE") || { rm -f "$new_config" "$new_meta"; return 1; }
+    [[ "$config_matches" == 1 && "$meta_matches" == 1 ]] || { rm -f "$new_config" "$new_meta"; fail '目标节点信息不一致，未应用修改，请重新进入菜单'; return 1; }
+    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '(.nodes[] | select(.tag==$tag)) |= (.protocol="ss2022" | .name=$name | .server=$server | .port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq -e --arg tag "$tag" --arg password "$password" --argjson port "$port" 'any(.inbounds[]?; .tag==$tag and .type=="shadowsocks" and (.listen_port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_config" >/dev/null 2>&1 || { rm -f "$new_config" "$new_meta"; fail 'Shadowsocks 配置修改结果校验失败'; return 1; }
+    jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" 'any(.nodes[]?; .tag==$tag and (.protocol // "vless-reality")=="ss2022" and .name==$name and .server==$server and (.port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_meta" >/dev/null 2>&1 || { rm -f "$new_config" "$new_meta"; fail 'Shadowsocks 元数据修改结果校验失败'; return 1; }
+    count=$(node_count); if apply_transaction "$new_config" "$new_meta" "$count"; then
+        success "节点 [$name] 修改成功"; printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_ss2022_link "$server" "$port" "$password" "$name")" "$NC"
+    else rm -f "$new_config" "$new_meta"; return 1; fi
+}
+
+modify_ss2022_node() {
+    local index="$1" tag name server port password choice value
+    tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
+    while true; do
+        name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE"); server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE"); port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE"); password=$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")
+        printf '\n  当前节点: %s%s%s (ss2022) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
+        printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 重新生成密码\n  %s[0]%s 返回\n' "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+        read_input choice '  请选择修改项: ' || return 1
+        case "$choice" in
+            0) return 0 ;;
+            1) read_input value "  请输入新节点名称 (回车保持 $name): " || return 1; value=${value:-$name}; valid_name "$value" || { fail '节点名称无效'; continue; }; printf '  节点名称：%s\n' "$value"; [[ "$value" == "$name" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }; apply_ss2022_node_update "$tag" "$value" "$server" "$port" "$password" || return 1; pause_enter '  按回车返回修改节点菜单...' ;;
+            2) read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1; value=${value:-$server}; valid_text "$value" || { fail '客户端连接地址无效'; continue; }; printf '  客户端连接地址：%s\n' "$value"; [[ "$value" == "$server" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }; apply_ss2022_node_update "$tag" "$name" "$value" "$port" "$password" || return 1; pause_enter '  按回车返回修改节点菜单...' ;;
+            3) read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1; value=${value:-$port}; valid_port "$value" || { fail '端口应为 1–65535'; continue; }; value=$((10#$value)); if (( value != port )) && port_conflict "$value" "$tag" tcp_udp; then fail "TCP/UDP 端口 $value 已被占用"; continue; fi; printf '  监听端口：%s\n' "$value"; (( value == port )) && { pause_enter '  按回车返回修改节点菜单...'; continue; }; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }; apply_ss2022_node_update "$tag" "$name" "$server" "$value" "$password" || return 1; pause_enter '  按回车返回修改节点菜单...' ;;
+            4) value=$("$SINGBOX_BIN" generate rand --base64 16 2>/dev/null) || { fail '生成 Shadowsocks 2022 密码失败'; continue; }; [[ -n "$value" ]] || { fail '生成 Shadowsocks 2022 密码失败'; continue; }; printf '  密码：%s\n' "$value"; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }; apply_ss2022_node_update "$tag" "$name" "$server" "$port" "$value" || return 1; pause_enter '  按回车返回修改节点菜单...' ;;
+            *) fail '无效选择' ;;
+        esac
+    done
+}
+
+modify_node() {
+    local index protocol
+    require_core || return 1
+    choose_node index || return 1
+    protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
+    case "$protocol" in
+        vless-reality) modify_vless_node "$index" ;;
+        anytls) modify_anytls_node "$index" ;;
+        ss2022) modify_ss2022_node "$index" ;;
+        *) fail '节点协议不受支持'; return 1 ;;
+    esac
+}
+
 delete_node() {
-    local index tag name answer new_config new_meta count
+    local index tag name answer new_config new_meta count protocol acme_dir
     choose_node index || return 1
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE"); name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
+    protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
+    acme_dir=$(jq -r --argjson i "$index" '.nodes[$i].acme_dir // empty' "$META_FILE")
     read_input answer "  确认删除节点 [$name]？(Y/N): " || return 1
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
     jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" > "$new_config" || return 1
     jq --arg tag "$tag" 'del(.nodes[] | select(.tag==$tag))' "$META_FILE" > "$new_meta" || return 1
     count=$(node_count); count=$((count - 1))
-    apply_transaction "$new_config" "$new_meta" "$count" && success "节点 [$name] 已删除"
+    if apply_transaction "$new_config" "$new_meta" "$count"; then
+        [[ "$protocol" == anytls && -n "$acme_dir" && "$acme_dir" == "$ACME_DIR/"* ]] && rm -rf -- "$acme_dir"
+        success "节点 [$name] 已删除"
+    else
+        rm -f "$new_config" "$new_meta"
+        return 1
+    fi
 }
 
 clear_nodes() {
@@ -784,7 +1122,13 @@ clear_nodes() {
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
     jq '.inbounds=[]' "$CONFIG_FILE" > "$new_config" || return 1; jq '.nodes=[]' "$META_FILE" > "$new_meta" || return 1
-    apply_transaction "$new_config" "$new_meta" 0 && success '所有节点已清空'
+    if apply_transaction "$new_config" "$new_meta" 0; then
+        rm -rf -- "$ACME_DIR"
+        success '所有节点已清空'
+    else
+        rm -f "$new_config" "$new_meta"
+        return 1
+    fi
 }
 
 start_service() {

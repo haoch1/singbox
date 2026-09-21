@@ -1,14 +1,17 @@
 # singbox
 
-面向 Linux VPS 的轻量 sing-box 管理脚本，当前支持 `VLESS + TCP + Reality + Vision` 节点增删查改、服务管理和配置检查
+面向 Linux VPS 的轻量 sing-box 管理脚本，支持 VLESS + Reality + Vision、AnyTLS 和 Shadowsocks 2022 节点管理
 
-当前管理脚本版本：`1.0.7`
+当前管理脚本版本：`1.1.0`
 
 ## 功能
 
-- 默认监听端口 `8443`，默认伪装域名 `www.bing.com`
-- 自动生成 UUID、Reality 密钥和 Short ID，并输出 `vless://` 节点链接
+- VLESS 默认监听端口 `8443`，默认伪装域名 `www.bing.com`
+- AnyTLS 使用 sing-box 原生 ACME IP 证书，需要 sing-box `1.14.0` 或更高版本
+- Shadowsocks 2022 固定使用 `2022-blake3-aes-128-gcm`
+- 自动生成协议凭据并输出对应节点链接
 - 支持 systemd、Alpine OpenRC 和无 init 环境
+- 支持三种协议的添加、查看、修改、删除、清空、分享链接和服务管理
 - 支持核心安装更新、管理脚本更新和卸载
 - OpenRC/direct 日志超过 10 MiB 时自动轮转，保留最近 5 MiB 和最多 3 个轮转文件
 - 启动时清理超过 24 小时的更新临时文件，不删除配置和节点数据
@@ -29,7 +32,7 @@
 sing-box 管理（当前节点：0 个）
 sing-box 状态：未安装
 sing-box 版本：未安装
-管理脚本版本：v1.0.7
+管理脚本版本：v1.1.0
 
 基础功能
 [1]  添加节点
@@ -51,7 +54,7 @@ sing-box 版本：未安装
 [0]  退出脚本
 ```
 
-卸载只清理本项目创建的 sing-box 配置、核心、服务、日志、锁、临时文件和管理命令，系统预先存在的外部核心和共享依赖会保留
+添加节点时选择协议。旧版 `nodes.json` 中没有 `protocol` 字段的节点按 VLESS + Reality + Vision 处理。AnyTLS 只接受公网 IP，并自动选择 TCP 80 或 443 完成 Let's Encrypt IP 证书验证，不会自动修改防火墙或端口转发。卸载只清理本项目创建的 sing-box 配置、核心、服务、日志、锁、临时文件和管理命令，系统预先存在的外部核心和共享依赖会保留
 
 ## 主要路径
 
