@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.0.6"
+SCRIPT_VERSION="1.0.7"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -810,21 +810,6 @@ restart_service() {
     fi
     svc_restart && success 'sing-box 已重启，开机自启已开启' || { fail 'sing-box 重启失败'; return 1; }
 }
-view_logs() {
-    info '按 Ctrl+C 退出日志查看'
-    local status=0
-    trap 'MENU_CANCELLED=1' INT
-    if [[ "$INIT_SYSTEM" == systemd ]]; then
-        journalctl -u sing-box -n 20 -f --no-pager || status=$?
-    else
-        [[ -f "$LOG_FILE" ]] || { trap interrupt_exit INT; warn "日志文件不存在: $LOG_FILE"; return 1; }
-        tail -n 20 -f "$LOG_FILE" || status=$?
-    fi
-    trap interrupt_exit INT
-    (( MENU_CANCELLED || status == 130 || status == 143 )) && { MENU_CANCELLED=1; return 0; }
-    return "$status"
-}
-
 update_script() (
     local temp first version old_hash new_hash target
     info '正在检查管理脚本更新'
@@ -940,14 +925,12 @@ menu() {
         menu_row "  ${BLUE}更新与维护${NC}"
         menu_row "  ${GREEN}[9]${BLUE}  安装/更新核心${NC}"
         menu_row "  ${GREEN}[10]${BLUE} 更新管理脚本${NC}"
-        menu_row "  ${GREEN}[11]${BLUE} 查看实时日志${NC}"
-        menu_row "  ${GREEN}[12]${BLUE} 检查配置${NC}"
-        menu_row "  ${GREEN}[13]${BLUE} 一键卸载${NC}"
+        menu_row "  ${GREEN}[11]${BLUE} 一键卸载${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
         printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
         local status=0
-        read -r -p '  请输入选项 [0-13]: ' choice || status=$?
+        read -r -p '  请输入选项 [0-11]: ' choice || status=$?
         (( status == 130 )) && interrupt_exit
         (( status != 0 )) && return 0
         case "$choice" in
@@ -963,9 +946,7 @@ menu() {
                     exec bash "${SCRIPT_TARGET:-$0}"
                 fi
                 ;;
-            11) view_logs ;;
-            12) check_config ;;
-            13) uninstall && return 0 ;; 0) return 0 ;;
+            11) uninstall && return 0 ;; 0) return 0 ;;
             *) fail '无效选项' ;;
         esac
         (( MENU_CANCELLED )) || pause_enter
