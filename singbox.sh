@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.1.2"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -44,6 +44,23 @@ info() { printf '  %s[信息] %s%s\n' "$CYAN" "$*" "$NC"; }
 warn() { printf '  %s[注意] %s%s\n' "$YELLOW" "$*" "$NC"; }
 success() { printf '  %s[成功] %s%s\n' "$GREEN" "$*" "$NC"; }
 interrupt_exit() { printf '\n'; exit 130; }
+
+reset_acme_state() {
+    ACME_DISABLE_HTTP=false
+    ACME_DISABLE_TLS=false
+    ACME_ALTERNATIVE_HTTP_PORT=0
+    ACME_PROVIDER_TAG=''
+    ACME_PROVIDER_DIR=''
+    ACME_PROVIDER_NEW=0
+    ACME_PROVIDER_CREATED=0
+}
+
+cleanup_new_acme_dir() {
+    if (( ACME_PROVIDER_NEW && ACME_PROVIDER_CREATED )) && [[ -n "$ACME_PROVIDER_DIR" && "$ACME_PROVIDER_DIR" == "$ACME_DIR/"* ]]; then
+        rm -rf -- "$ACME_PROVIDER_DIR"
+    fi
+    reset_acme_state
+}
 
 clear_terminal() {
     [[ -t 1 ]] || return 0
@@ -456,12 +473,16 @@ select_acme_challenge() {
 }
 
 prepare_acme_provider() {
-    local server="$1" provider_id
-    ACME_PROVIDER_TAG=$(jq -r --arg server "$server" --argjson disable_http "$ACME_DISABLE_HTTP" --argjson disable_tls "$ACME_DISABLE_TLS" --argjson alt "$ACME_ALTERNATIVE_HTTP_PORT" \
-        '[.certificate_providers[]? | select(.type=="acme" and (.domain // []) == [$server] and (.disable_http_challenge // false)==$disable_http and (.disable_tls_alpn_challenge // false)==$disable_tls and (.alternative_http_port // 0)==$alt)] | first | .tag // empty' "$CONFIG_FILE" 2>/dev/null || true)
+    local server="$1" exclude="${2:-}" provider_id
+    reset_acme_state
+    ACME_PROVIDER_TAG=$(jq -r --arg server "$server" \
+        '[.certificate_providers[]? | select(.type=="acme" and (.domain // []) == [$server])] | first | .tag // empty' "$CONFIG_FILE" 2>/dev/null || true)
     if [[ -n "$ACME_PROVIDER_TAG" ]]; then
         ACME_PROVIDER_DIR=$(jq -r --arg tag "$ACME_PROVIDER_TAG" '.certificate_providers[]? | select(.tag==$tag) | .data_directory // empty' "$CONFIG_FILE")
         [[ -n "$ACME_PROVIDER_DIR" ]] || { fail '现有 ACME 证书提供者缺少数据目录'; return 1; }
+        ACME_DISABLE_HTTP=$(jq -r --arg tag "$ACME_PROVIDER_TAG" '.certificate_providers[]? | select(.tag==$tag) | .disable_http_challenge // false' "$CONFIG_FILE")
+        ACME_DISABLE_TLS=$(jq -r --arg tag "$ACME_PROVIDER_TAG" '.certificate_providers[]? | select(.tag==$tag) | .disable_tls_alpn_challenge // false' "$CONFIG_FILE")
+        ACME_ALTERNATIVE_HTTP_PORT=$(jq -r --arg tag "$ACME_PROVIDER_TAG" '.certificate_providers[]? | select(.tag==$tag) | .alternative_http_port // 0' "$CONFIG_FILE")
         ACME_PROVIDER_NEW=0
         ACME_PROVIDER_CREATED=0
         if [[ ! -d "$ACME_PROVIDER_DIR" ]]; then
@@ -470,6 +491,7 @@ prepare_acme_provider() {
         fi
         return 0
     fi
+    select_acme_challenge "$exclude" || return 1
     provider_id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null) || return 1
     [[ "$provider_id" =~ ^[0-9a-fA-F]{16}$ ]] || { fail '生成 ACME 证书提供者标识失败'; return 1; }
     ACME_PROVIDER_TAG="anytls-acme-$provider_id"
@@ -479,6 +501,20 @@ prepare_acme_provider() {
     if [[ ! -d "$ACME_PROVIDER_DIR" ]]; then
         mkdir -p "$ACME_PROVIDER_DIR" && chmod 700 "$ACME_PROVIDER_DIR" || { fail '创建 ACME 证书目录失败'; return 1; }
         ACME_PROVIDER_CREATED=1
+    fi
+}
+
+validate_anytls_acme_port() {
+    local port="$1" challenge_port=0
+    if [[ "$ACME_DISABLE_HTTP" == false ]]; then
+        challenge_port=$ACME_ALTERNATIVE_HTTP_PORT
+        (( challenge_port > 0 )) || challenge_port=80
+    elif [[ "$ACME_DISABLE_TLS" == false ]]; then
+        challenge_port=443
+    fi
+    if (( challenge_port > 0 && port == challenge_port )); then
+        fail "AnyTLS 监听端口 $port 与 ACME 验证端口冲突"
+        return 1
     fi
 }
 
@@ -706,6 +742,7 @@ add_vless_node() {
 add_anytls_node() {
     require_anytls_core || return 1
     local server port name id tag password
+    reset_acme_state
     server=$(server_ip_guess)
     read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
     server=${server:-$(server_ip_guess)}
@@ -725,16 +762,17 @@ add_anytls_node() {
     read_input name "  节点名称 (默认 $name): " || return 1
     name=${name:-"AnyTLS-$port"}
     valid_name "$name" || { fail '节点名称不能为空、不能超过 80 字或包含控制字符'; return 1; }
-    select_acme_challenge || return 1
     password=$("$SINGBOX_BIN" generate rand --hex 32 2>/dev/null) || { fail '生成 AnyTLS 密码失败'; return 1; }
     [[ "$password" =~ ^[0-9a-fA-F]{64}$ ]] || { fail '生成 AnyTLS 密码格式无效'; return 1; }
     id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null || printf '%s' "$(date +%s%N)")
     tag="anytls-in-$id"
-    prepare_acme_provider "$server" || return 1
+    prepare_acme_provider "$server" || { cleanup_new_acme_dir; return 1; }
+    validate_anytls_acme_port "$port" || { cleanup_new_acme_dir; return 1; }
     apply_anytls_node_update '' "$name" "$server" "$port" "$password" "$ACME_PROVIDER_TAG" "$ACME_PROVIDER_DIR" "$ACME_PROVIDER_NEW" "$ACME_DISABLE_HTTP" "$ACME_DISABLE_TLS" "$ACME_ALTERNATIVE_HTTP_PORT" "$tag" "$id" '' '' || {
-        (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"
+        cleanup_new_acme_dir
         return 1
     }
+    reset_acme_state
 }
 
 add_ss2022_node() {
@@ -1024,7 +1062,7 @@ apply_anytls_node_update() {
     count=$(node_count); (( count == 0 )) && count=1
     if apply_transaction "$new_config" "$new_meta" "$count"; then
         [[ -n "$acme_backup" ]] && rm -rf "$acme_backup"
-        if [[ -n "$old_dir" && "$old_dir" == "$ACME_DIR/"* && "$old_dir" != "$provider_dir" ]] && ! jq -e --arg dir "$old_dir" 'any(.nodes[]?; (.protocol // "vless-reality")=="anytls" and .acme_dir==$dir)' "$new_meta" >/dev/null 2>&1; then rm -rf -- "$old_dir"; fi
+        if [[ -n "$old_dir" && "$old_dir" == "$ACME_DIR/"* && "$old_dir" != "$provider_dir" ]] && ! jq -e --arg dir "$old_dir" 'any(.nodes[]?; (.protocol // "vless-reality")=="anytls" and .acme_dir==$dir)' "$META_FILE" >/dev/null 2>&1; then rm -rf -- "$old_dir"; fi
         success "节点 [$name] $(if [[ -z "$old_tag" ]]; then printf 添加成功; else printf 修改成功; fi)"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_anytls_link "$server" "$port" "$password" "$name")" "$NC"
     else
@@ -1037,7 +1075,9 @@ apply_anytls_node_update() {
 modify_anytls_node() {
     local index="$1" tag name server port password old_dir old_provider_tag provider_tag provider_dir provider_new disable_http disable_tls alternative_http_port choice value
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
+    reset_acme_state
     while true; do
+        reset_acme_state
         name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
         server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE")
         port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE")
@@ -1047,6 +1087,7 @@ modify_anytls_node() {
         old_provider_tag="$provider_tag"
         if [[ -n "$provider_tag" ]]; then
             provider_dir=$(jq -r --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag) | .data_directory // empty' "$CONFIG_FILE")
+            [[ -n "$old_dir" ]] || old_dir="$provider_dir"
             disable_http=$(jq -r --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag) | .disable_http_challenge // false' "$CONFIG_FILE")
             disable_tls=$(jq -r --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag) | .disable_tls_alpn_challenge // false' "$CONFIG_FILE")
             alternative_http_port=$(jq -r --arg tag "$provider_tag" '.certificate_providers[]? | select(.tag==$tag) | .alternative_http_port // 0' "$CONFIG_FILE")
@@ -1066,27 +1107,30 @@ modify_anytls_node() {
             1)
                 read_input value "  请输入新节点名称 (回车保持 $name): " || return 1; value=${value:-$name}; valid_name "$value" || { fail '节点名称无效'; continue; }
                 printf '  节点名称：%s\n' "$value"; [[ "$value" == "$name" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }
-                if [[ -z "$provider_tag" ]]; then select_acme_challenge "$tag" || continue; prepare_acme_provider "$server" || continue; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
-                confirm_node_update || { (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"; (( MENU_CANCELLED )) && return 1; continue; }
-                apply_anytls_node_update "$tag" "$value" "$server" "$port" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" || { (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"; return 1; }; pause_enter '  按回车返回修改节点菜单...';;
+                if [[ -z "$provider_tag" ]]; then prepare_acme_provider "$server" "$tag" || { cleanup_new_acme_dir; continue; }; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
+                confirm_node_update || { cleanup_new_acme_dir; (( MENU_CANCELLED )) && return 1; continue; }
+                apply_anytls_node_update "$tag" "$value" "$server" "$port" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" || { cleanup_new_acme_dir; return 1; }; reset_acme_state; pause_enter '  按回车返回修改节点菜单...';;
             2)
                 read_input value "  请输入新的服务器公网 IP (回车保持 $server): " || return 1; value=${value:-$server}; valid_ip_literal "$value" || { fail '服务器地址必须是 IPv4 或 IPv6 地址'; continue; }
                 printf '  服务器公网 IP：%s\n' "$value"; [[ "$value" == "$server" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }
-                select_acme_challenge "$tag" || continue; prepare_acme_provider "$value" || continue; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"
-                confirm_node_update || { (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"; (( MENU_CANCELLED )) && return 1; continue; }
-                apply_anytls_node_update "$tag" "$name" "$value" "$port" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" || { (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"; return 1; }; pause_enter '  按回车返回修改节点菜单...';;
+                prepare_acme_provider "$value" "$tag" || { cleanup_new_acme_dir; continue; }; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"
+                validate_anytls_acme_port "$port" || { cleanup_new_acme_dir; continue; }
+                confirm_node_update || { cleanup_new_acme_dir; (( MENU_CANCELLED )) && return 1; continue; }
+                apply_anytls_node_update "$tag" "$name" "$value" "$port" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" || { cleanup_new_acme_dir; return 1; }; reset_acme_state; pause_enter '  按回车返回修改节点菜单...';;
             3)
                 read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1; value=${value:-$port}; valid_port "$value" || { fail '端口应为 1–65535'; continue; }; value=$((10#$value));
                 if (( value != port )) && port_conflict "$value" "$tag" tcp; then fail "TCP 端口 $value 已被占用"; continue; fi
                 printf '  监听端口：%s\n' "$value"; (( value == port )) && { pause_enter '  按回车返回修改节点菜单...'; continue; }
-                if [[ -z "$provider_tag" ]]; then select_acme_challenge "$tag" || continue; prepare_acme_provider "$server" || continue; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
-                confirm_node_update || { (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"; (( MENU_CANCELLED )) && return 1; continue; }
-                apply_anytls_node_update "$tag" "$name" "$server" "$value" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" || { (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"; return 1; }; pause_enter '  按回车返回修改节点菜单...';;
+                if [[ -z "$provider_tag" ]]; then prepare_acme_provider "$server" "$tag" || { cleanup_new_acme_dir; continue; }; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
+                validate_anytls_acme_port "$value" || { cleanup_new_acme_dir; continue; }
+                confirm_node_update || { cleanup_new_acme_dir; (( MENU_CANCELLED )) && return 1; continue; }
+                apply_anytls_node_update "$tag" "$name" "$server" "$value" "$password" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" || { cleanup_new_acme_dir; return 1; }; reset_acme_state; pause_enter '  按回车返回修改节点菜单...';;
             4)
                 value=$("$SINGBOX_BIN" generate rand --hex 32 2>/dev/null) || { fail '生成 AnyTLS 密码失败'; continue; }; [[ "$value" =~ ^[0-9a-fA-F]{64}$ ]] || { fail '生成 AnyTLS 密码格式无效'; continue; }
-                printf '  密码：%s\n' "$value"; confirm_node_update || { (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"; (( MENU_CANCELLED )) && return 1; continue; }
-                if [[ -z "$provider_tag" ]]; then select_acme_challenge "$tag" || continue; prepare_acme_provider "$server" || continue; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
-                apply_anytls_node_update "$tag" "$name" "$server" "$port" "$value" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" || { (( ACME_PROVIDER_CREATED )) && rm -rf -- "$ACME_PROVIDER_DIR"; return 1; }; pause_enter '  按回车返回修改节点菜单...';;
+                printf '  密码：%s\n' "$value"; confirm_node_update || { cleanup_new_acme_dir; (( MENU_CANCELLED )) && return 1; continue; }
+                if [[ -z "$provider_tag" ]]; then prepare_acme_provider "$server" "$tag" || { cleanup_new_acme_dir; continue; }; provider_tag="$ACME_PROVIDER_TAG"; provider_dir="$ACME_PROVIDER_DIR"; provider_new="$ACME_PROVIDER_NEW"; disable_http="$ACME_DISABLE_HTTP"; disable_tls="$ACME_DISABLE_TLS"; alternative_http_port="$ACME_ALTERNATIVE_HTTP_PORT"; fi
+                validate_anytls_acme_port "$port" || { cleanup_new_acme_dir; continue; }
+                apply_anytls_node_update "$tag" "$name" "$server" "$port" "$value" "$provider_tag" "$provider_dir" "$provider_new" "$disable_http" "$disable_tls" "$alternative_http_port" "$tag" '' "$old_dir" "$old_provider_tag" || { cleanup_new_acme_dir; return 1; }; reset_acme_state; pause_enter '  按回车返回修改节点菜单...';;
             *) fail '无效选择' ;;
         esac
     done
@@ -1147,6 +1191,9 @@ delete_node() {
     protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
     acme_dir=$(jq -r --argjson i "$index" '.nodes[$i].acme_dir // empty' "$META_FILE")
     provider_tag=$(jq -r --arg tag "$tag" '.inbounds[]? | select(.tag==$tag) | .tls.certificate_provider | if type=="string" then . else empty end' "$CONFIG_FILE")
+    if [[ -z "$acme_dir" && -n "$provider_tag" ]]; then
+        acme_dir=$(jq -r --arg provider "$provider_tag" '.certificate_providers[]? | select(.tag==$provider) | .data_directory // empty' "$CONFIG_FILE")
+    fi
     read_input answer "  确认删除节点 [$name]？(Y/N): " || return 1
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
@@ -1157,7 +1204,7 @@ delete_node() {
     fi
     count=$(node_count); count=$((count - 1))
     if apply_transaction "$new_config" "$new_meta" "$count"; then
-        if [[ "$protocol" == anytls && -n "$acme_dir" && "$acme_dir" == "$ACME_DIR/"* ]] && ! jq -e --arg dir "$acme_dir" 'any(.nodes[]?; (.protocol // "vless-reality")=="anytls" and .acme_dir==$dir)' "$new_meta" >/dev/null 2>&1; then
+        if [[ "$protocol" == anytls && -n "$acme_dir" && "$acme_dir" == "$ACME_DIR/"* ]] && ! jq -e --arg dir "$acme_dir" 'any(.nodes[]?; (.protocol // "vless-reality")=="anytls" and .acme_dir==$dir)' "$META_FILE" >/dev/null 2>&1; then
             rm -rf -- "$acme_dir"
         fi
         success "节点 [$name] 已删除"
