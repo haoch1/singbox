@@ -374,7 +374,7 @@ valid_text() { [[ -n "$1" && "$1" != *[[:space:]/\\]* && "$1" != *[[:cntrl:]]* ]
 valid_name() { [[ -n "$1" && ${#1} -le 80 && "$1" != *[[:cntrl:]]* ]]; }
 
 valid_ip_literal() {
-    local value="$1" part count=0 compressed=0 remainder
+    local value="$1" part count=0 compressed=0 prefix remainder
     if [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
         IFS='.' read -r -a parts <<< "$value"
         for part in "${parts[@]}"; do (( 10#$part <= 255 )) || return 1; done
@@ -384,8 +384,8 @@ valid_ip_literal() {
     [[ "$value" != :* || "$value" == ::* ]] || return 1
     [[ "$value" != *: || "$value" == *:: ]] || return 1
     [[ "$value" == *::* ]] && compressed=1
-    remainder=${value//::/}
-    [[ "$remainder" != *::* ]] || return 1
+    prefix=${value%%::*}; remainder=${value#*::}
+    [[ "$prefix" != *::* && "$remainder" != *::* ]] || return 1
     [[ "$value" != *.* ]] || return 1
     IFS=':' read -r -a parts <<< "$value"
     for part in "${parts[@]}"; do
