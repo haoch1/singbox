@@ -634,9 +634,10 @@ build_anytls_link() {
 }
 
 build_ss2022_link() {
-    local server="$1" port="$2" password="$3" name="$4" host
+    local server="$1" port="$2" password="$3" name="$4" host userinfo
     host=$(format_server_for_uri "$server")
-    printf 'ss://%s:%s@%s:%s#%s' "$SS2022_METHOD" "$(uri_escape "$password")" "$host" "$port" "$(uri_escape "$name")"
+    userinfo=$(printf '%s' "$SS2022_METHOD:$password" | base64 | tr -d '\r\n')
+    printf 'ss://%s@%s:%s#%s' "$userinfo" "$host" "$port" "$(uri_escape "$name")"
 }
 
 build_node_link() {
