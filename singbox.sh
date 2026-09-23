@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.1.8"
+SCRIPT_VERSION="1.1.9"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -455,6 +455,14 @@ build_node_link() {
     esac
 }
 
+protocol_label() {
+    case "$1" in
+        vless-reality) printf 'VLESS-Reality' ;;
+        ss2022) printf 'Shadowsocks 2022' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 migrate_ipv4_policy() {
     local new_config current_normalized new_normalized backup active=0 result
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
@@ -764,7 +772,8 @@ add_node() {
 print_nodes() {
     jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE" | \
         while IFS=$'\t' read -r index name protocol port; do
-            printf '  %s[%s]%s %s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$protocol" "$BLUE" "$port" "$NC"
+            protocol=$(protocol_label "$protocol")
+            printf '  %s[%s]%s %s (%s%s%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$YELLOW" "$protocol" "$NC" "$BLUE" "$port" "$NC"
         done
 }
 
@@ -785,7 +794,8 @@ view_nodes() {
     printf '\n'; info "=== 当前节点信息（共 ${count} 个） ==="; printf '\n'
     (( count > 0 )) || { warn '暂无节点'; return 0; }
     while IFS=$'\t' read -r index name protocol port; do
-        printf '  %s[%s]%s %s%s%s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
+        protocol=$(protocol_label "$protocol")
+        printf '  %s[%s]%s %s%s%s (%s%s%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$YELLOW" "$protocol" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$((index - 1))")" "$NC"
         printf '\n'
     done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE")
@@ -845,7 +855,7 @@ modify_vless_node() {
         public=$(jq -r --argjson i "$index" '.nodes[$i].public_key' "$META_FILE")
         sid=$(jq -r --argjson i "$index" '.nodes[$i].short_id' "$META_FILE")
         private=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.reality.private_key' "$CONFIG_FILE")
-        printf '\n  当前节点: %s%s%s (vless-reality) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
+        printf '\n  当前节点: %s%s%s (%sVLESS-Reality%s) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$YELLOW" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改 UUID\n  %s[5]%s 修改伪装域名/SNI\n  %s[6]%s 重新生成 Reality 密钥和 Short ID\n  %s[0]%s 返回\n' \
             "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
@@ -980,7 +990,7 @@ modify_ss2022_node() {
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
         name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE"); server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE"); port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE"); password=$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")
-        printf '\n  当前节点: %s%s%s (ss2022) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
+        printf '\n  当前节点: %s%s%s (%sShadowsocks 2022%s) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$YELLOW" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 重新生成密码\n  %s[0]%s 返回\n' "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
         case "$choice" in
