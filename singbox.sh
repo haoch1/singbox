@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.1.9"
+SCRIPT_VERSION="1.2.0"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -28,9 +28,6 @@ DEFAULT_PORT=8443
 DEFAULT_SS_PORT=8388
 DEFAULT_SNI="www.bing.com"
 IPV4_DNS_TAG="singbox-ipv4-dns"
-IPV4_DNS_SERVER="1.1.1.1"
-IPV4_DNS_PORT=53
-IPV4_RESOLVER='{"server":"singbox-ipv4-dns","strategy":"ipv4_only"}'
 SS2022_METHOD="2022-blake3-aes-128-gcm"
 INIT_SYSTEM="direct"
 
@@ -390,7 +387,7 @@ core_version() {
 init_state() {
     mkdir -p "$SINGBOX_DIR" || return 1
     chmod 700 "$SINGBOX_DIR" 2>/dev/null || true
-    [[ -s "$CONFIG_FILE" ]] || printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"dns":{"servers":[{"type":"udp","tag":"singbox-ipv4-dns","server":"1.1.1.1","server_port":53}],"final":"singbox-ipv4-dns","strategy":"ipv4_only"},"outbounds":[{"type":"direct","tag":"direct","domain_resolver":{"server":"singbox-ipv4-dns","strategy":"ipv4_only"}}],"route":{"rules":[{"ip_version":6,"action":"reject"}],"default_domain_resolver":{"server":"singbox-ipv4-dns","strategy":"ipv4_only"},"final":"direct"}}' > "$CONFIG_FILE"
+    [[ -s "$CONFIG_FILE" ]] || printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"dns":{"servers":[{"type":"local","tag":"singbox-ipv4-dns","prefer_go":true}],"final":"singbox-ipv4-dns","strategy":"ipv4_only"},"outbounds":[{"type":"direct","tag":"direct"}],"route":{"rules":[{"ip_version":6,"action":"reject"}],"default_domain_resolver":{"server":"singbox-ipv4-dns","strategy":"ipv4_only"},"final":"direct"}}' > "$CONFIG_FILE"
     [[ -s "$META_FILE" ]] || printf '%s\n' '{"nodes":[]}' > "$META_FILE"
     jq -e 'type == "object" and (.inbounds|type == "array") and (.outbounds|type == "array")' "$CONFIG_FILE" >/dev/null 2>&1 || { fail "配置文件格式无效: $CONFIG_FILE"; return 1; }
     jq -e 'type == "object" and (.nodes|type == "array")' "$META_FILE" >/dev/null 2>&1 || { fail "节点元数据格式无效: $META_FILE"; return 1; }
@@ -455,18 +452,10 @@ build_node_link() {
     esac
 }
 
-protocol_label() {
-    case "$1" in
-        vless-reality) printf 'VLESS-Reality' ;;
-        ss2022) printf 'Shadowsocks 2022' ;;
-        *) printf '%s' "$1" ;;
-    esac
-}
-
 migrate_ipv4_policy() {
     local new_config current_normalized new_normalized backup active=0 result
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    if ! jq --arg dns_tag "$IPV4_DNS_TAG" --arg dns_server "$IPV4_DNS_SERVER" --argjson dns_port "$IPV4_DNS_PORT" '
+    if ! jq --arg dns_tag "$IPV4_DNS_TAG" '
         def resolver_fields: {server:$dns_tag, strategy:"ipv4_only"};
         .dns = (if (.dns | type) == "object" then .dns else {} end)
         | .dns.strategy = "ipv4_only"
@@ -474,18 +463,17 @@ migrate_ipv4_policy() {
         | .dns.servers = (if (.dns.servers | type) == "array" then .dns.servers else [] end
             | if any(.[]?; (.tag // "") == $dns_tag) then
                 map(if (.tag // "") == $dns_tag
-                    then (. + {type:"udp", server:$dns_server, server_port:$dns_port} | del(.domain_resolver))
+                    then (. + {type:"local", prefer_go:true} | del(.server,.server_port,.domain_resolver))
                     else . end)
-              else . + [{type:"udp", tag:$dns_tag, server:$dns_server, server_port:$dns_port}]
+              else . + [{type:"local", tag:$dns_tag, prefer_go:true}]
               end
-            | map(if (.tag // "") != $dns_tag and (.server? != null and (.type // "") != "local")
-                  then . + {domain_resolver:resolver_fields} else . end))
+            | map(.))
         | .dns.rules = (if (.dns.rules | type) == "array" then .dns.rules else [] end
             | map(if has("strategy") then .strategy = "ipv4_only" else . end))
         | .outbounds = (if (.outbounds | type) == "array" then .outbounds else [] end
-            | map(if .type == "direct" then . + {domain_resolver:resolver_fields} else . end)
+            | map(if .type == "direct" then del(.domain_resolver) else . end)
             | if any(.[]; .type == "direct" and .tag == "direct")
-              then . else . + [{type:"direct", tag:"direct", domain_resolver:resolver_fields}] end)
+              then . else . + [{type:"direct", tag:"direct"}] end)
         | .route = (if (.route | type) == "object" then .route else {} end)
         | .route.default_domain_resolver = resolver_fields
         | .route.rules = (if (.route.rules | type) == "array" then .route.rules else [] end
@@ -493,7 +481,7 @@ migrate_ipv4_policy() {
               then . else [{ip_version:6, action:"reject"}] + . end)
         | .inbounds = (if (.inbounds | type) == "array" then .inbounds else [] end
             | map(if .type == "vless" and .tls.reality.enabled == true and (.tls.reality.handshake | type) == "object"
-                  then .tls.reality.handshake += {domain_resolver:resolver_fields} | .
+                  then .tls.reality.handshake |= del(.domain_resolver) | .
                   else . end))
     ' "$CONFIG_FILE" > "$new_config"; then
         rm -f "$new_config"
@@ -702,8 +690,8 @@ add_vless_node() {
     local new_config new_meta
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
     new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
-    jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" --argjson resolver "$IPV4_RESOLVER" \
-        '.inbounds += [{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443,domain_resolver:$resolver},private_key:$private,short_id:[$sid]}}}]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
+        '.inbounds += [{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$private,short_id:[$sid]}}}]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
     jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
         '.nodes += [{protocol:"vless-reality",id:$id,tag:$tag,name:$name,server:$server,port:$port,sni:$sni,uuid:$uuid,public_key:$public,short_id:$sid}]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
     current_count=$(node_count); current_count=$((current_count + 1))
@@ -772,8 +760,7 @@ add_node() {
 print_nodes() {
     jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE" | \
         while IFS=$'\t' read -r index name protocol port; do
-            protocol=$(protocol_label "$protocol")
-            printf '  %s[%s]%s %s (%s%s%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$YELLOW" "$protocol" "$NC" "$BLUE" "$port" "$NC"
+            printf '  %s[%s]%s %s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$protocol" "$BLUE" "$port" "$NC"
         done
 }
 
@@ -794,8 +781,7 @@ view_nodes() {
     printf '\n'; info "=== 当前节点信息（共 ${count} 个） ==="; printf '\n'
     (( count > 0 )) || { warn '暂无节点'; return 0; }
     while IFS=$'\t' read -r index name protocol port; do
-        protocol=$(protocol_label "$protocol")
-        printf '  %s[%s]%s %s%s%s (%s%s%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$YELLOW" "$protocol" "$NC" "$BLUE" "$port" "$NC"
+        printf '  %s[%s]%s %s%s%s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$((index - 1))")" "$NC"
         printf '\n'
     done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE")
@@ -813,8 +799,8 @@ apply_vless_node_update() {
         fail '目标节点信息不一致，未应用修改，请重新进入菜单'
         return 1
     fi
-    jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" --argjson resolver "$IPV4_RESOLVER" \
-        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.handshake.domain_resolver=$resolver | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+    jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
+        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.handshake |= del(.domain_resolver) | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
     jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
         '(.nodes[] | select(.tag==$tag)) |= (.protocol=(.protocol // "vless-reality") | .name=$name | .server=$server | .port=$port | .sni=$sni | .uuid=$uuid | .public_key=$public | .short_id=$sid)' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
     if ! jq -e --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
@@ -855,7 +841,7 @@ modify_vless_node() {
         public=$(jq -r --argjson i "$index" '.nodes[$i].public_key' "$META_FILE")
         sid=$(jq -r --argjson i "$index" '.nodes[$i].short_id' "$META_FILE")
         private=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.reality.private_key' "$CONFIG_FILE")
-        printf '\n  当前节点: %s%s%s (%sVLESS-Reality%s) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$YELLOW" "$NC" "$BLUE" "$port" "$NC"
+        printf '\n  当前节点: %s%s%s (vless-reality) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改 UUID\n  %s[5]%s 修改伪装域名/SNI\n  %s[6]%s 重新生成 Reality 密钥和 Short ID\n  %s[0]%s 返回\n' \
             "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
@@ -990,7 +976,7 @@ modify_ss2022_node() {
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
         name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE"); server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE"); port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE"); password=$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")
-        printf '\n  当前节点: %s%s%s (%sShadowsocks 2022%s) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$YELLOW" "$NC" "$BLUE" "$port" "$NC"
+        printf '\n  当前节点: %s%s%s (ss2022) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 重新生成密码\n  %s[0]%s 返回\n' "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
         case "$choice" in
