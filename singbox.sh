@@ -6,7 +6,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # 运行时路径与版本
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -481,110 +481,7 @@ init_state() {
         fail "节点元数据格式无效: $META_FILE"
         return 1
     }
-    migrate_network_policy || return 1
     chmod 600 "$CONFIG_FILE" "$META_FILE" 2>/dev/null || true
-}
-
-migrate_network_policy() {
-    local new_config current_normalized new_normalized backup active=0 result
-    new_config=$(mktemp "$SINGBOX_DIR/.migration.XXXXXX") || {
-        fail '无法创建配置迁移临时文件'
-        return 1
-    }
-    if ! jq '
-        if (.dns? | type) == "object" then
-            .dns |= (
-                if .strategy? == "ipv4_only" then del(.strategy) else . end
-                | if .final? == "singbox-ipv4-dns" then del(.final) else . end
-                | if (.servers? | type) == "array" then
-                    .servers |= map(select((.tag // "") != "singbox-ipv4-dns"))
-                    | if (.servers | length) == 0 then del(.servers) else . end
-                  else . end
-                | if (.rules? | type) == "array" then
-                    .rules |= map(if .strategy? == "ipv4_only" then del(.strategy) else . end)
-                    | if (.rules | length) == 0 then del(.rules) else . end
-                  else . end
-            )
-            | if (.dns | length) == 0 then del(.dns) else . end
-        else . end
-        | if (.route? | type) == "object" then
-            .route |= (
-                if (.default_domain_resolver? | type) == "object" then
-                    if .default_domain_resolver.server? == "singbox-ipv4-dns" then
-                        del(.default_domain_resolver)
-                    elif .default_domain_resolver.strategy? == "ipv4_only" then
-                        del(.default_domain_resolver.strategy)
-                    else . end
-                else . end
-                | if (.rules? | type) == "array" then
-                    .rules |= map(select((.ip_version? != 6) or (.action? != "reject")))
-                    | if (.rules | length) == 0 then del(.rules) else . end
-                  else . end
-            )
-            | if (.route | length) == 0 then del(.route) else . end
-        else . end
-    ' "$CONFIG_FILE" >"$new_config"; then
-        rm -f "$new_config"
-        fail '旧配置迁移失败'
-        return 1
-    fi
-    current_normalized=$(jq -cS . "$CONFIG_FILE") || {
-        rm -f "$new_config"
-        fail '旧配置读取失败'
-        return 1
-    }
-    new_normalized=$(jq -cS . "$new_config") || {
-        rm -f "$new_config"
-        fail '迁移后配置读取失败'
-        return 1
-    }
-    if [[ "$current_normalized" == "$new_normalized" ]]; then
-        rm -f "$new_config"
-        return 0
-    fi
-    resolve_core >/dev/null 2>&1 || true
-    if [[ -x "$SINGBOX_BIN" ]]; then
-        if ! result=$("$SINGBOX_BIN" check -c "$new_config" 2>&1); then
-            rm -f "$new_config"
-            fail '迁移后的配置检查失败'
-            while IFS= read -r line; do printf '    %s\n' "$line"; done <<<"$result"
-            return 1
-        fi
-    fi
-    backup=$(mktemp "$SINGBOX_DIR/.migration-backup.XXXXXX") || {
-        rm -f "$new_config"
-        fail '旧配置备份失败'
-        return 1
-    }
-    cp -p "$CONFIG_FILE" "$backup" || {
-        rm -f "$new_config" "$backup"
-        fail '旧配置备份失败'
-        return 1
-    }
-    svc_active && active=1
-    if ((active)); then
-        svc_stop || {
-            rm -f "$new_config" "$backup"
-            fail '无法停止服务，旧配置未迁移'
-            return 1
-        }
-    fi
-    if ! chmod 600 "$new_config" || ! mv -f "$new_config" "$CONFIG_FILE"; then
-        cp -p "$backup" "$CONFIG_FILE" 2>/dev/null || true
-        rm -f "$new_config" "$backup"
-        ((active)) && svc_start >/dev/null 2>&1 || true
-        fail '迁移后的配置写入失败'
-        return 1
-    fi
-    if ((active)) && ! svc_start; then
-        cp -p "$backup" "$CONFIG_FILE" 2>/dev/null || true
-        svc_start >/dev/null 2>&1 || true
-        rm -f "$backup"
-        fail '迁移后的配置启动失败，已恢复旧配置'
-        return 1
-    fi
-    rm -f "$backup"
-    info '已移除旧配置中的 IPv4 出站限制'
 }
 
 # 节点数据、配置校验与事务提交
