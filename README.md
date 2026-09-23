@@ -2,7 +2,7 @@
 
 面向 Linux VPS 的轻量 sing-box 管理脚本，支持 VLESS + Reality + Vision 和 Shadowsocks 2022 节点管理
 
-当前管理脚本版本：`1.2.0`
+当前管理脚本版本：`1.2.1`
 
 ## 功能
 
@@ -33,7 +33,7 @@
 sing-box 管理（当前节点：0 个）
 sing-box 状态：未安装
 sing-box 版本：未安装
-管理脚本版本：v1.2.0
+管理脚本版本：v1.2.1
 
 基础功能
 [1]  添加节点
@@ -55,7 +55,7 @@ sing-box 版本：未安装
 [0]  退出脚本
 ```
 
-添加节点时选择 VLESS + Reality + Vision 或 Shadowsocks 2022 协议。旧版 `nodes.json` 中没有 `protocol` 字段的节点按 VLESS + Reality + Vision 处理。脚本首次运行会幂等迁移 IPv4 出站策略，保留节点、端口和凭据；配置已符合策略时不会重启服务。卸载只清理本项目创建的 sing-box 配置、核心、服务、日志、锁、临时文件和管理命令，系统预先存在的外部核心和共享依赖会保留
+添加节点时选择 VLESS + Reality + Vision 或 Shadowsocks 2022 协议。旧版 `nodes.json` 中没有 `protocol` 字段的节点按 VLESS + Reality + Vision 处理。卸载只清理本项目创建的 sing-box 配置、核心、服务、日志、锁、临时文件和管理命令，系统预先存在的外部核心和共享依赖会保留
 
 ## 主要路径
 

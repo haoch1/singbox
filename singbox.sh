@@ -5,7 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -391,7 +391,6 @@ init_state() {
     [[ -s "$META_FILE" ]] || printf '%s\n' '{"nodes":[]}' > "$META_FILE"
     jq -e 'type == "object" and (.inbounds|type == "array") and (.outbounds|type == "array")' "$CONFIG_FILE" >/dev/null 2>&1 || { fail "配置文件格式无效: $CONFIG_FILE"; return 1; }
     jq -e 'type == "object" and (.nodes|type == "array")' "$META_FILE" >/dev/null 2>&1 || { fail "节点元数据格式无效: $META_FILE"; return 1; }
-    migrate_ipv4_policy || return 1
     chmod 600 "$CONFIG_FILE" "$META_FILE" 2>/dev/null || true
 }
 
@@ -450,76 +449,6 @@ build_node_link() {
         ss2022) build_ss2022_link "$server" "$port" "$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")" "$name" ;;
         *) return 1 ;;
     esac
-}
-
-migrate_ipv4_policy() {
-    local new_config current_normalized new_normalized backup active=0 result
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    if ! jq --arg dns_tag "$IPV4_DNS_TAG" '
-        def resolver_fields: {server:$dns_tag, strategy:"ipv4_only"};
-        .dns = (if (.dns | type) == "object" then .dns else {} end)
-        | .dns.strategy = "ipv4_only"
-        | .dns.final = $dns_tag
-        | .dns.servers = (if (.dns.servers | type) == "array" then .dns.servers else [] end
-            | if any(.[]?; (.tag // "") == $dns_tag) then
-                map(if (.tag // "") == $dns_tag
-                    then (. + {type:"local", prefer_go:true} | del(.server,.server_port,.domain_resolver))
-                    else . end)
-              else . + [{type:"local", tag:$dns_tag, prefer_go:true}]
-              end
-            | map(.))
-        | .dns.rules = (if (.dns.rules | type) == "array" then .dns.rules else [] end
-            | map(if has("strategy") then .strategy = "ipv4_only" else . end))
-        | .outbounds = (if (.outbounds | type) == "array" then .outbounds else [] end
-            | map(if .type == "direct" then del(.domain_resolver) else . end)
-            | if any(.[]; .type == "direct" and .tag == "direct")
-              then . else . + [{type:"direct", tag:"direct"}] end)
-        | .route = (if (.route | type) == "object" then .route else {} end)
-        | .route.default_domain_resolver = resolver_fields
-        | .route.rules = (if (.route.rules | type) == "array" then .route.rules else [] end
-            | if any(.[]?; .ip_version == 6 and .action == "reject")
-              then . else [{ip_version:6, action:"reject"}] + . end)
-        | .inbounds = (if (.inbounds | type) == "array" then .inbounds else [] end
-            | map(if .type == "vless" and .tls.reality.enabled == true and (.tls.reality.handshake | type) == "object"
-                  then .tls.reality.handshake |= del(.domain_resolver) | .
-                  else . end))
-    ' "$CONFIG_FILE" > "$new_config"; then
-        rm -f "$new_config"
-        fail 'IPv4 出站策略迁移失败'
-        return 1
-    fi
-    current_normalized=$(jq -cS . "$CONFIG_FILE") || { rm -f "$new_config"; return 1; }
-    new_normalized=$(jq -cS . "$new_config") || { rm -f "$new_config"; return 1; }
-    if [[ "$current_normalized" == "$new_normalized" ]]; then
-        rm -f "$new_config"
-        return 0
-    fi
-    resolve_core >/dev/null 2>&1 || true
-    if [[ -x "$SINGBOX_BIN" ]]; then
-        if ! result=$("$SINGBOX_BIN" check -c "$new_config" 2>&1); then
-            rm -f "$new_config"
-            fail 'IPv4 出站策略未通过 sing-box 配置检查'
-            while IFS= read -r line; do printf '    %s\n' "$line"; done <<< "$result"
-            return 1
-        fi
-    fi
-    svc_active && active=1
-    backup=$(mktemp -d "$SINGBOX_DIR/.recovery.XXXXXX") || { rm -f "$new_config"; return 1; }
-    cp -p "$CONFIG_FILE" "$backup/config" || { rm -f "$new_config"; rm -rf "$backup"; fail 'IPv4 出站策略备份失败'; return 1; }
-    chmod 600 "$new_config" && mv -f "$new_config" "$CONFIG_FILE" || {
-        rm -f "$new_config"
-        rm -rf "$backup"
-        fail 'IPv4 出站策略写入失败'
-        return 1
-    }
-    if (( active )) && ! svc_restart; then
-        cp -p "$backup/config" "$CONFIG_FILE" 2>/dev/null || true
-        svc_restart >/dev/null 2>&1 || true
-        rm -rf "$backup"
-        fail 'IPv4 出站策略应用失败，已恢复原配置'
-        return 1
-    fi
-    rm -rf "$backup"
 }
 
 check_config() {
