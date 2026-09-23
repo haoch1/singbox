@@ -5,6 +5,7 @@ set -uo pipefail
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
+# 运行时路径与版本
 SCRIPT_VERSION="1.2.1"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
@@ -31,14 +32,25 @@ IPV4_DNS_TAG="singbox-ipv4-dns"
 SS2022_METHOD="2022-blake3-aes-128-gcm"
 INIT_SYSTEM="direct"
 
-RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'
-CYAN=$'\033[0;36m'; BLUE=$'\033[1;36m'; NC=$'\033[0m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+CYAN=$'\033[0;36m'
+BLUE=$'\033[1;36m'
+NC=$'\033[0m'
 
-fail() { printf '  %s[错误] %s%s\n' "$RED" "$*" "$NC" >&2; return 1; }
+# 输出、信号与终端
+fail() {
+    printf '  %s[错误] %s%s\n' "$RED" "$*" "$NC" >&2
+    return 1
+}
 info() { printf '  %s[信息] %s%s\n' "$CYAN" "$*" "$NC"; }
 warn() { printf '  %s[注意] %s%s\n' "$YELLOW" "$*" "$NC"; }
 success() { printf '  %s[成功] %s%s\n' "$GREEN" "$*" "$NC"; }
-interrupt_exit() { printf '\n'; exit 130; }
+interrupt_exit() {
+    printf '\n'
+    exit 130
+}
 
 clear_terminal() {
     [[ -t 1 ]] || return 0
@@ -46,29 +58,31 @@ clear_terminal() {
     printf '\033[3J\033[2J\033[H\033[0m'
 }
 
+# 日志轮转与临时文件维护
 file_size_bytes() {
     local file=$1 size
     size=$(stat -c '%s' "$file" 2>/dev/null || true)
     if [[ $size =~ ^[0-9]+$ ]]; then
         printf '%s' "$size"
     else
-        wc -c < "$file" 2>/dev/null | tr -d '[:space:]' || printf '0'
+        wc -c <"$file" 2>/dev/null | tr -d '[:space:]' || printf '0'
     fi
 }
 
 rotate_file_log() {
+    # 原地截断活动日志，保持服务正在写入的 inode。
     local file=$1 size temp index
     [[ -f $file ]] || return 0
     size=$(file_size_bytes "$file")
     [[ $size =~ ^[0-9]+$ ]] || return 0
-    (( size > LOG_MAX_BYTES )) || return 0
+    ((size > LOG_MAX_BYTES)) || return 0
     rm -f -- "$file.$((LOG_ROTATIONS + 1))"
-    for (( index=LOG_ROTATIONS; index > 1; index-- )); do
+    for ((index = LOG_ROTATIONS; index > 1; index--)); do
         [[ -e "$file.$((index - 1))" ]] && mv -f -- "$file.$((index - 1))" "$file.$index" 2>/dev/null || true
     done
     cp -p -- "$file" "$file.1" 2>/dev/null || return 0
     temp=$(mktemp "${file}.trim.XXXXXX") || return 0
-    if tail -c "$LOG_KEEP_BYTES" "$file" > "$temp" 2>/dev/null && cat "$temp" > "$file"; then
+    if tail -c "$LOG_KEEP_BYTES" "$file" >"$temp" 2>/dev/null && cat "$temp" >"$file"; then
         chmod 640 "$file" 2>/dev/null || true
     fi
     rm -f -- "$temp"
@@ -94,6 +108,7 @@ maintenance_cleanup() {
         '.transaction.*' '.core.*' '.config.*' '.meta.*' '.script.*'
 }
 
+# 管理脚本锁与交互输入
 lock_fd_is_inherited() {
     local fd_target lock_target
     [[ -e "/proc/$$/fd/9" ]] || return 1
@@ -114,10 +129,14 @@ lock_owner_pid() {
             return 0
         fi
     fi
-    [[ -n "$lock_target" ]] || { printf '%s' "$owner"; return 0; }
+    [[ -n "$lock_target" ]] || {
+        printf '%s' "$owner"
+        return 0
+    }
     for fd in /proc/[0-9]*/fd/9; do
         [[ -e "$fd" ]] || continue
-        pid=${fd#/proc/}; pid=${pid%%/*}
+        pid=${fd#/proc/}
+        pid=${pid%%/*}
         [[ "$pid" == "$$" ]] && continue
         fd_target=$(readlink -f "$fd" 2>/dev/null || true)
         if [[ -n "$fd_target" && "$fd_target" == "$lock_target" ]]; then
@@ -129,25 +148,39 @@ lock_owner_pid() {
 }
 
 cleanup_lock() {
-    local owner; owner=$(lock_owner_pid)
+    local owner
+    owner=$(lock_owner_pid)
     [[ "$owner" == "$$" ]] && rm -f -- "$LOCK_PID_FILE"
     exec 9>&- 2>/dev/null || true
 }
 
 acquire_manager_lock() {
+    # exec 重新加载脚本时复用 fd 9；服务子进程必须关闭该描述符。
     local owner
-    mkdir -p "$(dirname "$LOCK_FILE")" || { fail '无法创建管理锁目录'; return 1; }
+    mkdir -p "$(dirname "$LOCK_FILE")" || {
+        fail '无法创建管理锁目录'
+        return 1
+    }
     if lock_fd_is_inherited; then
-        printf '%s\n' "$$" > "$LOCK_PID_FILE" || { fail '无法写入管理锁 PID'; return 1; }
+        printf '%s\n' "$$" >"$LOCK_PID_FILE" || {
+            fail '无法写入管理锁 PID'
+            return 1
+        }
         trap cleanup_lock EXIT
         return 0
     fi
-    exec 9>"$LOCK_FILE" || { fail '无法打开管理锁'; return 1; }
+    exec 9>"$LOCK_FILE" || {
+        fail '无法打开管理锁'
+        return 1
+    }
     if ! flock -n 9; then
         owner=$(lock_owner_pid)
         if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
             exec 9>&-
-            exec 9>"$LOCK_FILE" || { fail '无法重新打开管理锁'; return 1; }
+            exec 9>"$LOCK_FILE" || {
+                fail '无法重新打开管理锁'
+                return 1
+            }
             flock -n 9 || {
                 owner=$(lock_owner_pid)
                 fail '已有 sing-box 管理脚本实例正在运行'
@@ -162,27 +195,38 @@ acquire_manager_lock() {
             return 1
         fi
     fi
-    printf '%s\n' "$$" > "$LOCK_PID_FILE" || { exec 9>&-; fail '无法写入管理锁 PID'; return 1; }
+    printf '%s\n' "$$" >"$LOCK_PID_FILE" || {
+        exec 9>&-
+        fail '无法写入管理锁 PID'
+        return 1
+    }
     trap cleanup_lock EXIT
 }
 
 read_input() {
     local dest="$1" prompt="$2" input_value='' status=0
     read -r -p "$prompt" input_value || status=$?
-    (( status == 130 )) && return 130
-    (( status != 0 )) && { INPUT_EOF=1; return "$status"; }
-    [[ "$input_value" == [qQ] ]] && { MENU_CANCELLED=1; return 1; }
+    ((status == 130)) && return 130
+    ((status != 0)) && {
+        INPUT_EOF=1
+        return "$status"
+    }
+    [[ "$input_value" == [qQ] ]] && {
+        MENU_CANCELLED=1
+        return 1
+    }
     printf -v "$dest" '%s' "$input_value"
 }
 
 pause_enter() {
     local prompt="${1:-  按回车返回主菜单...}" status=0
     read -r -p "$prompt" _ || status=$?
-    (( status == 130 )) && interrupt_exit
-    (( status != 0 )) && INPUT_EOF=1
+    ((status == 130)) && interrupt_exit
+    ((status != 0)) && INPUT_EOF=1
     return 0
 }
 
+# 依赖、初始化系统与服务控制
 install_packages() {
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y bash ca-certificates curl jq tar coreutils util-linux iproute2 procps
@@ -202,8 +246,11 @@ ensure_dependencies() {
     local required=(curl jq tar sha256sum flock ss timeout base64)
     local missing=0 cmd
     for cmd in "${required[@]}"; do command -v "$cmd" >/dev/null 2>&1 || missing=1; done
-    (( missing == 0 )) || install_packages || return 1
-    for cmd in "${required[@]}"; do command -v "$cmd" >/dev/null 2>&1 || { fail "缺少依赖: $cmd"; return 1; }; done
+    ((missing == 0)) || install_packages || return 1
+    for cmd in "${required[@]}"; do command -v "$cmd" >/dev/null 2>&1 || {
+        fail "缺少依赖: $cmd"
+        return 1
+    }; done
 }
 
 detect_init() {
@@ -265,7 +312,7 @@ svc_start() {
             mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
             rm -f "$PID_FILE"
             nohup "$SINGBOX_BIN" run -c "$CONFIG_FILE" >>"$LOG_FILE" 2>&1 </dev/null 9>&- &
-            printf '%s\n' "$!" > "$PID_FILE"
+            printf '%s\n' "$!" >"$PID_FILE"
             sleep 1
             svc_active
             ;;
@@ -277,21 +324,40 @@ svc_stop() {
         systemd)
             svc_active || return 0
             systemctl stop sing-box >/dev/null 2>&1 9>&- || return 1
-            for _ in {1..40}; do svc_active || return 0; sleep 0.25; done
-            return 1 ;;
+            for _ in {1..40}; do
+                svc_active || return 0
+                sleep 0.25
+            done
+            return 1
+            ;;
         openrc)
             svc_active || return 0
             rc-service sing-box stop >/dev/null 2>&1 9>&- || return 1
-            for _ in {1..40}; do svc_active || return 0; sleep 0.25; done
-            return 1 ;;
+            for _ in {1..40}; do
+                svc_active || return 0
+                sleep 0.25
+            done
+            return 1
+            ;;
         direct)
-            local pid='' recorded=''; [[ -s "$PID_FILE" ]] && recorded=$(cat "$PID_FILE" 2>/dev/null || true)
-            if [[ "$recorded" =~ ^[0-9]+$ ]] && ! kill -0 "$recorded" 2>/dev/null; then rm -f "$PID_FILE"; return 0; fi
+            local pid='' recorded=''
+            [[ -s "$PID_FILE" ]] && recorded=$(cat "$PID_FILE" 2>/dev/null || true)
+            if [[ "$recorded" =~ ^[0-9]+$ ]] && ! kill -0 "$recorded" 2>/dev/null; then
+                rm -f "$PID_FILE"
+                return 0
+            fi
             pid=$(direct_service_pid 2>/dev/null || true)
-            [[ -n "$pid" ]] || { [[ -s "$PID_FILE" ]] || return 0; fail 'PID 文件对应的进程不是 sing-box，未停止'; return 1; }
+            [[ -n "$pid" ]] || {
+                [[ -s "$PID_FILE" ]] || return 0
+                fail 'PID 文件对应的进程不是 sing-box，未停止'
+                return 1
+            }
             kill "$pid" 2>/dev/null || return 1
             for _ in {1..40}; do
-                kill -0 "$pid" 2>/dev/null || { rm -f "$PID_FILE"; return 0; }
+                kill -0 "$pid" 2>/dev/null || {
+                    rm -f "$PID_FILE"
+                    return 0
+                }
                 sleep 0.25
             done
             return 1
@@ -307,7 +373,11 @@ svc_restart() {
             rc-service sing-box restart >/dev/null 2>&1 9>&- || return 1
             svc_active
             ;;
-        direct) svc_stop || return 1; sleep 1; svc_start ;;
+        direct)
+            svc_stop || return 1
+            sleep 1
+            svc_start
+            ;;
     esac
 }
 
@@ -318,25 +388,26 @@ direct_service_pid() {
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
     [[ -r "/proc/$pid/cmdline" ]] || return 1
-    cmdline=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null || true)
-    grep -Fxq "$SINGBOX_BIN" <<< "$cmdline" || return 1
-    grep -Fxq run <<< "$cmdline" || return 1
-    grep -Fxq "$CONFIG_FILE" <<< "$cmdline" || return 1
+    cmdline=$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null || true)
+    grep -Fxq "$SINGBOX_BIN" <<<"$cmdline" || return 1
+    grep -Fxq run <<<"$cmdline" || return 1
+    grep -Fxq "$CONFIG_FILE" <<<"$cmdline" || return 1
     printf '%s\n' "$pid"
 }
 
 write_service_unit() {
     if [[ "$INIT_SYSTEM" == systemd ]]; then
         mkdir -p "${SYSTEMD_UNIT%/*}" || return 1
-        printf '%s\n' '[Unit]' 'Description=sing-box service' 'After=network-online.target' 'Wants=network-online.target' '[Service]' "ExecStart=$SINGBOX_BIN run -c $CONFIG_FILE" 'Restart=on-failure' 'RestartSec=3' 'LimitNOFILE=1048576' '[Install]' 'WantedBy=multi-user.target' > "$SYSTEMD_UNIT" || return 1
+        printf '%s\n' '[Unit]' 'Description=sing-box service' 'After=network-online.target' 'Wants=network-online.target' '[Service]' "ExecStart=$SINGBOX_BIN run -c $CONFIG_FILE" 'Restart=on-failure' 'RestartSec=3' 'LimitNOFILE=1048576' '[Install]' 'WantedBy=multi-user.target' >"$SYSTEMD_UNIT" || return 1
         chmod 644 "$SYSTEMD_UNIT" || return 1
         svc_reload
     elif [[ "$INIT_SYSTEM" == openrc ]]; then
-        printf '%s\n' '#!/sbin/openrc-run' 'description="sing-box service"' "command=\"$SINGBOX_BIN\"" "command_args=\"run -c $CONFIG_FILE\"" 'supervisor="supervise-daemon"' 'respawn_delay=3' "output_log=\"$LOG_FILE\"" "error_log=\"$LOG_FILE\"" 'depend() { use net; }' > "$OPENRC_UNIT" || return 1
+        printf '%s\n' '#!/sbin/openrc-run' 'description="sing-box service"' "command=\"$SINGBOX_BIN\"" "command_args=\"run -c $CONFIG_FILE\"" 'supervisor="supervise-daemon"' 'respawn_delay=3' "output_log=\"$LOG_FILE\"" "error_log=\"$LOG_FILE\"" 'depend() { use net; }' >"$OPENRC_UNIT" || return 1
         chmod 755 "$OPENRC_UNIT" || return 1
     fi
 }
 
+# 输入校验、地址处理与核心探测
 get_url() {
     local url="$1" output="$2"
     if command -v curl >/dev/null 2>&1; then
@@ -348,7 +419,7 @@ get_url() {
     fi
 }
 
-valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
 valid_text() { [[ -n "$1" && "$1" != *[[:space:]/\\]* && "$1" != *[[:cntrl:]]* ]]; }
 valid_name() { [[ -n "$1" && ${#1} -le 80 && "$1" != *[[:cntrl:]]* ]]; }
 
@@ -371,10 +442,16 @@ resolve_core() {
     local candidate discovered=''
     if [[ -n "$SINGBOX_BIN" && -x "$SINGBOX_BIN" ]]; then return 0; fi
     if discovered=$(command -v sing-box 2>/dev/null); then
-        [[ -x "$discovered" ]] && { SINGBOX_BIN="$discovered"; return 0; }
+        [[ -x "$discovered" ]] && {
+            SINGBOX_BIN="$discovered"
+            return 0
+        }
     fi
     for candidate in /usr/local/bin/sing-box /usr/bin/sing-box /usr/local/sbin/sing-box /usr/sbin/sing-box; do
-        [[ -x "$candidate" ]] && { SINGBOX_BIN="$candidate"; return 0; }
+        [[ -x "$candidate" ]] && {
+            SINGBOX_BIN="$candidate"
+            return 0
+        }
     done
     SINGBOX_BIN="$CORE_INSTALL_BIN"
     return 1
@@ -382,23 +459,33 @@ resolve_core() {
 
 core_version() {
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { printf '未安装'; return; }
+    [[ -x "$SINGBOX_BIN" ]] || {
+        printf '未安装'
+        return
+    }
     local output v
     output=$("$SINGBOX_BIN" version 2>/dev/null || true)
-    v=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
+    v=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<<"$output")
     [[ -n "$v" ]] && printf 'v%s' "$v" || printf '未知'
 }
 
 init_state() {
     mkdir -p "$SINGBOX_DIR" || return 1
     chmod 700 "$SINGBOX_DIR" 2>/dev/null || true
-    [[ -s "$CONFIG_FILE" ]] || printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"dns":{"servers":[{"type":"local","tag":"singbox-ipv4-dns","prefer_go":true}],"final":"singbox-ipv4-dns","strategy":"ipv4_only"},"outbounds":[{"type":"direct","tag":"direct"}],"route":{"rules":[{"ip_version":6,"action":"reject"}],"default_domain_resolver":{"server":"singbox-ipv4-dns","strategy":"ipv4_only"},"final":"direct"}}' > "$CONFIG_FILE"
-    [[ -s "$META_FILE" ]] || printf '%s\n' '{"nodes":[]}' > "$META_FILE"
-    jq -e 'type == "object" and (.inbounds|type == "array") and (.outbounds|type == "array")' "$CONFIG_FILE" >/dev/null 2>&1 || { fail "配置文件格式无效: $CONFIG_FILE"; return 1; }
-    jq -e 'type == "object" and (.nodes|type == "array")' "$META_FILE" >/dev/null 2>&1 || { fail "节点元数据格式无效: $META_FILE"; return 1; }
+    [[ -s "$CONFIG_FILE" ]] || printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"dns":{"servers":[{"type":"local","tag":"singbox-ipv4-dns","prefer_go":true}],"final":"singbox-ipv4-dns","strategy":"ipv4_only"},"outbounds":[{"type":"direct","tag":"direct"}],"route":{"rules":[{"ip_version":6,"action":"reject"}],"default_domain_resolver":{"server":"singbox-ipv4-dns","strategy":"ipv4_only"},"final":"direct"}}' >"$CONFIG_FILE"
+    [[ -s "$META_FILE" ]] || printf '%s\n' '{"nodes":[]}' >"$META_FILE"
+    jq -e 'type == "object" and (.inbounds|type == "array") and (.outbounds|type == "array")' "$CONFIG_FILE" >/dev/null 2>&1 || {
+        fail "配置文件格式无效: $CONFIG_FILE"
+        return 1
+    }
+    jq -e 'type == "object" and (.nodes|type == "array")' "$META_FILE" >/dev/null 2>&1 || {
+        fail "节点元数据格式无效: $META_FILE"
+        return 1
+    }
     chmod 600 "$CONFIG_FILE" "$META_FILE" 2>/dev/null || true
 }
 
+# 节点数据、配置校验与事务提交
 node_count() { jq -r '.nodes | length' "$META_FILE"; }
 
 # 以 NUL 分隔读取节点字段，避免同一节点反复启动 jq；节点输入校验已拒绝控制字符。
@@ -425,16 +512,18 @@ port_conflict() {
 
 generate_credentials() {
     NEW_UUID=$("$SINGBOX_BIN" generate uuid 2>/dev/null) || return 1
-    local pair; pair=$("$SINGBOX_BIN" generate reality-keypair 2>/dev/null) || return 1
-    NEW_PRIVATE=$(awk '/PrivateKey/ {print $NF}' <<< "$pair")
-    NEW_PUBLIC=$(awk '/PublicKey/ {print $NF}' <<< "$pair")
+    local pair
+    pair=$("$SINGBOX_BIN" generate reality-keypair 2>/dev/null) || return 1
+    NEW_PRIVATE=$(awk '/PrivateKey/ {print $NF}' <<<"$pair")
+    NEW_PUBLIC=$(awk '/PublicKey/ {print $NF}' <<<"$pair")
     NEW_SHORT_ID=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null) || return 1
     [[ -n "$NEW_UUID" && -n "$NEW_PRIVATE" && -n "$NEW_PUBLIC" && "$NEW_SHORT_ID" =~ ^[0-9a-fA-F]{1,16}$ ]]
 }
 
 build_vless_link() {
     local server="$1" port="$2" uuid="$3" sni="$4" public="$5" sid="$6" name="$7"
-    local host; host=$(format_server_for_uri "$server")
+    local host
+    host=$(format_server_for_uri "$server")
     printf 'vless://%s@%s:%s?security=reality&encryption=none&pbk=%s&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=%s&sid=%s#%s' \
         "$uuid" "$host" "$port" "$(uri_escape "$public")" "$(uri_escape "$sni")" "$sid" "$(uri_escape "$name")"
 }
@@ -453,8 +542,15 @@ build_node_link() {
         while [[ $value == *$'\n' ]]; do value=${value%$'\n'}; done
         fields+=("$value")
     done < <(node_fields "$index")
-    protocol=${fields[0]-}; server=${fields[1]-}; port=${fields[2]-}; name=${fields[3]-}
-    uuid=${fields[4]-}; sni=${fields[5]-}; public=${fields[6]-}; sid=${fields[7]-}; password=${fields[8]-}
+    protocol=${fields[0]-}
+    server=${fields[1]-}
+    port=${fields[2]-}
+    name=${fields[3]-}
+    uuid=${fields[4]-}
+    sni=${fields[5]-}
+    public=${fields[6]-}
+    sid=${fields[7]-}
+    password=${fields[8]-}
     case "$protocol" in
         vless-reality)
             build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name"
@@ -467,7 +563,10 @@ build_node_link() {
 check_config() {
     local mode="${1:-verbose}"
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'; return 1; }
+    [[ -x "$SINGBOX_BIN" ]] || {
+        warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'
+        return 1
+    }
     [[ "$mode" == quiet ]] || info '正在检查 config.json'
     local result
     if result=$("$SINGBOX_BIN" check -c "$CONFIG_FILE" 2>&1); then
@@ -477,75 +576,128 @@ check_config() {
     fail 'config.json 配置检查失败'
     while IFS= read -r line; do
         printf '    %s\n' "$line"
-    done <<< "$result"
+    done <<<"$result"
     return 1
 }
 
 apply_transaction() {
+    # 同时备份配置、元数据和服务单元，以便失败后恢复一致状态。
     local new_config="$1" new_meta="$2" count="$3" backup active=0 enabled=0 rollback_ok=1 unit_path unit_exists=0
-    backup=$(mktemp -d "$SINGBOX_DIR/.recovery.XXXXXX") || { fail '无法创建事务备份'; return 1; }
-    cp -p "$CONFIG_FILE" "$backup/config" 2>/dev/null || { fail "配置备份失败，备份保留在 $backup"; return 1; }
-    cp -p "$META_FILE" "$backup/meta" 2>/dev/null || { fail "节点元数据备份失败，备份保留在 $backup"; return 1; }
+    backup=$(mktemp -d "$SINGBOX_DIR/.recovery.XXXXXX") || {
+        fail '无法创建事务备份'
+        return 1
+    }
+    cp -p "$CONFIG_FILE" "$backup/config" 2>/dev/null || {
+        fail "配置备份失败，备份保留在 $backup"
+        return 1
+    }
+    cp -p "$META_FILE" "$backup/meta" 2>/dev/null || {
+        fail "节点元数据备份失败，备份保留在 $backup"
+        return 1
+    }
     [[ "$INIT_SYSTEM" == systemd ]] && unit_path="$SYSTEMD_UNIT" || unit_path="$OPENRC_UNIT"
-    if [[ -f "$unit_path" ]]; then cp -p "$unit_path" "$backup/unit" 2>/dev/null || { fail "服务单元备份失败，备份保留在 $backup"; return 1; }; unit_exists=1; fi
+    if [[ -f "$unit_path" ]]; then
+        cp -p "$unit_path" "$backup/unit" 2>/dev/null || {
+            fail "服务单元备份失败，备份保留在 $backup"
+            return 1
+        }
+        unit_exists=1
+    fi
     svc_active && active=1
     svc_enabled && enabled=1
     rollback_transaction() {
         cp -p "$backup/config" "$CONFIG_FILE" 2>/dev/null || rollback_ok=0
         cp -p "$backup/meta" "$META_FILE" 2>/dev/null || rollback_ok=0
-        if (( unit_exists )); then cp -p "$backup/unit" "$unit_path" 2>/dev/null || rollback_ok=0; else rm -f "$unit_path" 2>/dev/null || rollback_ok=0; fi
+        if ((unit_exists)); then cp -p "$backup/unit" "$unit_path" 2>/dev/null || rollback_ok=0; else rm -f "$unit_path" 2>/dev/null || rollback_ok=0; fi
         svc_reload
-        if (( active )); then svc_active || svc_start >/dev/null 2>&1 || rollback_ok=0; else svc_active && svc_stop >/dev/null 2>&1 || { svc_active && rollback_ok=0; }; fi
-        if (( enabled )); then svc_enabled || svc_enable >/dev/null 2>&1 || rollback_ok=0; else svc_enabled && svc_disable >/dev/null 2>&1 || { svc_enabled && rollback_ok=0; }; fi
-        if (( rollback_ok )); then rm -rf "$backup"; fail '事务失败，已恢复原配置'; else fail "事务回滚失败，备份保留在 $backup"; fi
+        if ((active)); then svc_active || svc_start >/dev/null 2>&1 || rollback_ok=0; else svc_active && svc_stop >/dev/null 2>&1 || { svc_active && rollback_ok=0; }; fi
+        if ((enabled)); then svc_enabled || svc_enable >/dev/null 2>&1 || rollback_ok=0; else svc_enabled && svc_disable >/dev/null 2>&1 || { svc_enabled && rollback_ok=0; }; fi
+        if ((rollback_ok)); then
+            rm -rf "$backup"
+            fail '事务失败，已恢复原配置'
+        else fail "事务回滚失败，备份保留在 $backup"; fi
     }
-    chmod 600 "$new_config" "$new_meta" || { fail "临时配置权限设置失败，备份保留在 $backup"; return 1; }
+    chmod 600 "$new_config" "$new_meta" || {
+        fail "临时配置权限设置失败，备份保留在 $backup"
+        return 1
+    }
     if ! mv -f "$new_config" "$CONFIG_FILE" || ! mv -f "$new_meta" "$META_FILE"; then
-        rollback_transaction; return 1
+        rollback_transaction
+        return 1
     fi
     if ! check_config quiet; then
-        rollback_transaction; return 1
+        rollback_transaction
+        return 1
     fi
-    if (( count > 0 )); then
-        if ! write_service_unit; then rollback_transaction; return 1; fi
-        if ! svc_enable; then rollback_transaction; return 1; fi
-        if (( active )); then
-            if ! svc_restart && ! svc_active; then svc_start || { rollback_transaction; return 1; }; fi
-            svc_active || { rollback_transaction; return 1; }
+    if ((count > 0)); then
+        if ! write_service_unit; then
+            rollback_transaction
+            return 1
+        fi
+        if ! svc_enable; then
+            rollback_transaction
+            return 1
+        fi
+        if ((active)); then
+            if ! svc_restart && ! svc_active; then svc_start || {
+                rollback_transaction
+                return 1
+            }; fi
+            svc_active || {
+                rollback_transaction
+                return 1
+            }
         else
-            svc_start || { rollback_transaction; return 1; }
+            svc_start || {
+                rollback_transaction
+                return 1
+            }
         fi
     else
         if (svc_active && ! svc_stop) || (svc_enabled && ! svc_disable); then
-            rollback_transaction; return 1
+            rollback_transaction
+            return 1
         fi
     fi
     rm -rf "$backup"
     return 0
 }
 
+# 核心更新与节点管理
 install_core() (
     local requested="${1:-latest}" temp version arch libc asset_name asset_url digest binary member current installed='' output
     resolve_core >/dev/null 2>&1 || true
     info '正在检查 sing-box 核心更新'
     temp=$(mktemp -d "$SINGBOX_DIR/.core.XXXXXX") || exit 1
     trap 'rm -rf "$temp"' EXIT INT TERM
-    get_url 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' "$temp/release.json" || { fail '获取 sing-box 官方版本失败'; exit 1; }
-    version=$(jq -er '.tag_name | sub("^v"; "") | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$temp/release.json") || { fail '官方版本信息无效'; exit 1; }
-    [[ "$requested" == latest || "$requested" == "$version" ]] || { fail "固定版本不匹配: $requested"; exit 1; }
+    get_url 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' "$temp/release.json" || {
+        fail '获取 sing-box 官方版本失败'
+        exit 1
+    }
+    version=$(jq -er '.tag_name | sub("^v"; "") | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$temp/release.json") || {
+        fail '官方版本信息无效'
+        exit 1
+    }
+    [[ "$requested" == latest || "$requested" == "$version" ]] || {
+        fail "固定版本不匹配: $requested"
+        exit 1
+    }
     if [[ -x "$SINGBOX_BIN" ]]; then
         output=$("$SINGBOX_BIN" version 2>/dev/null || true)
-        installed=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
+        installed=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<<"$output")
         if [[ "$requested" == latest && "$installed" == "$version" ]]; then
             info "sing-box 核心已是最新版本 v$version"
             exit 0
         fi
     fi
     case "$(uname -m)" in
-        x86_64|amd64) arch=amd64 ;;
-        aarch64|arm64) arch=arm64 ;;
-        armv7l|armv7) arch=armv7 ;;
-        *) fail "暂不支持架构: $(uname -m)"; exit 1 ;;
+        x86_64 | amd64) arch=amd64 ;;
+        aarch64 | arm64) arch=arm64 ;;
+        armv7l | armv7) arch=armv7 ;;
+        *)
+            fail "暂不支持架构: $(uname -m)"
+            exit 1
+            ;;
     esac
     output=$(ldd --version 2>&1 || true)
     if [[ "$output" == *musl* || "$output" == *Musl* ]]; then
@@ -556,47 +708,76 @@ install_core() (
     if [[ "$libc" == musl ]]; then
         asset_name=$(jq -er --arg v "$version" --arg a "$arch" '
             [.assets[] | .name | select(. == ("sing-box-" + $v + "-linux-" + $a + "-musl.tar.gz"))][0]
-            // error("对应架构的 musl 安装包不存在")' "$temp/release.json") || { fail '找不到对应架构安装包'; exit 1; }
+            // error("对应架构的 musl 安装包不存在")' "$temp/release.json") || {
+            fail '找不到对应架构安装包'
+            exit 1
+        }
     else
         asset_name=$(jq -er --arg v "$version" --arg a "$arch" '
             ([.assets[] | .name | select(. == ("sing-box-" + $v + "-linux-" + $a + "-glibc.tar.gz"))][0]
              // [.assets[] | .name | select(. == ("sing-box-" + $v + "-linux-" + $a + ".tar.gz"))][0]
-             // error("对应架构的 glibc 安装包不存在"))' "$temp/release.json") || { fail '找不到对应架构安装包'; exit 1; }
+             // error("对应架构的 glibc 安装包不存在"))' "$temp/release.json") || {
+            fail '找不到对应架构安装包'
+            exit 1
+        }
     fi
     asset_url=$(jq -er --arg n "$asset_name" '.assets[] | select(.name == $n) | .browser_download_url' "$temp/release.json") || exit 1
     digest=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .digest // empty' "$temp/release.json")
-    get_url "$asset_url" "$temp/package.tar.gz" || { fail '核心下载失败'; exit 1; }
+    get_url "$asset_url" "$temp/package.tar.gz" || {
+        fail '核心下载失败'
+        exit 1
+    }
     if [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
-        local actual; actual=$(sha256sum "$temp/package.tar.gz" | awk '{print $1}')
-        [[ "$actual" == "${digest#sha256:}" ]] || { fail '核心 SHA256 校验失败'; exit 1; }
+        local actual
+        actual=$(sha256sum "$temp/package.tar.gz" | awk '{print $1}')
+        [[ "$actual" == "${digest#sha256:}" ]] || {
+            fail '核心 SHA256 校验失败'
+            exit 1
+        }
     fi
-    tar -tzf "$temp/package.tar.gz" > "$temp/files" || { fail '核心压缩包无效'; exit 1; }
+    tar -tzf "$temp/package.tar.gz" >"$temp/files" || {
+        fail '核心压缩包无效'
+        exit 1
+    }
     member=$(awk '/(^|\/)sing-box$/ {print; exit}' "$temp/files")
-    [[ -n "$member" && "$member" != /* && "$member" != *..* ]] || { fail '核心压缩包内容无效'; exit 1; }
+    [[ -n "$member" && "$member" != /* && "$member" != *..* ]] || {
+        fail '核心压缩包内容无效'
+        exit 1
+    }
     binary="$temp/sing-box"
-    tar -xOzf "$temp/package.tar.gz" -- "$member" > "$binary" || exit 1
+    tar -xOzf "$temp/package.tar.gz" -- "$member" >"$binary" || exit 1
     chmod 755 "$binary"
     output=$("$binary" version 2>/dev/null || true)
-    current=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
-    [[ "$current" == "$version" ]] || { fail "核心版本不匹配: $current"; exit 1; }
+    current=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<<"$output")
+    [[ "$current" == "$version" ]] || {
+        fail "核心版本不匹配: $current"
+        exit 1
+    }
     if [[ -x "$SINGBOX_BIN" ]]; then cp -p "$SINGBOX_BIN" "$temp/old" || exit 1; fi
     mkdir -p "${SINGBOX_BIN%/*}" || exit 1
     mv -f "$binary" "$SINGBOX_BIN" || exit 1
     chmod 755 "$SINGBOX_BIN"
     if [[ -s "$CONFIG_FILE" ]] && ! check_config quiet; then
         [[ -s "$temp/old" ]] && cp -p "$temp/old" "$SINGBOX_BIN" || rm -f "$SINGBOX_BIN"
-        fail '新核心无法通过当前配置校验，已恢复旧核心'; exit 1
+        fail '新核心无法通过当前配置校验，已恢复旧核心'
+        exit 1
     fi
     success "sing-box 核心已更新至 v$version"
 )
 
 update_core() {
-    install_core latest || { fail 'sing-box 核心更新失败'; return 1; }
+    install_core latest || {
+        fail 'sing-box 核心更新失败'
+        return 1
+    }
 }
 
 require_core() {
     resolve_core >/dev/null 2>&1 || true
-    [[ -x "$SINGBOX_BIN" ]] || { warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'; return 1; }
+    [[ -x "$SINGBOX_BIN" ]] || {
+        warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'
+        return 1
+    }
 }
 
 add_vless_node() {
@@ -606,42 +787,72 @@ add_vless_node() {
     read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
     server=${server:-$(server_ip_guess)}
     while [[ -z "$server" ]] || ! valid_text "$server"; do
-        fail '请输入有效的 IP 或域名'; read_input server '  服务器地址: ' || return 1
+        fail '请输入有效的 IP 或域名'
+        read_input server '  服务器地址: ' || return 1
     done
     port="$DEFAULT_PORT"
     while true; do
         read_input port "  监听端口 (默认 $DEFAULT_PORT): " || return 1
         port=${port:-$DEFAULT_PORT}
-        valid_port "$port" || { fail '端口应为 1–65535'; continue; }
+        valid_port "$port" || {
+            fail '端口应为 1–65535'
+            continue
+        }
         port=$((10#$port))
-        port_conflict "$port" && { fail "TCP 端口 $port 已被占用"; continue; }
+        port_conflict "$port" && {
+            fail "TCP 端口 $port 已被占用"
+            continue
+        }
         break
     done
     sni="$DEFAULT_SNI"
     read_input sni "  伪装域名 (默认 $DEFAULT_SNI): " || return 1
     sni=${sni:-$DEFAULT_SNI}
-    valid_text "$sni" || { fail '伪装域名格式无效'; return 1; }
+    valid_text "$sni" || {
+        fail '伪装域名格式无效'
+        return 1
+    }
     name="VLESS-TCP-REALITY-VISION-$port"
     read_input name "  节点名称 (默认 $name): " || return 1
     name=${name:-"VLESS-TCP-REALITY-VISION-$port"}
-    valid_name "$name" || { fail '节点名称不能为空、不能超过 80 字或包含控制字符'; return 1; }
-    generate_credentials || { fail '生成节点凭据失败'; return 1; }
-    uuid="$NEW_UUID"; private="$NEW_PRIVATE"; public="$NEW_PUBLIC"; sid="$NEW_SHORT_ID"
+    valid_name "$name" || {
+        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
+        return 1
+    }
+    generate_credentials || {
+        fail '生成节点凭据失败'
+        return 1
+    }
+    uuid="$NEW_UUID"
+    private="$NEW_PRIVATE"
+    public="$NEW_PUBLIC"
+    sid="$NEW_SHORT_ID"
     id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null || printf '%s' "$(date +%s%N)")
     tag="vless-in-$id"
     local new_config new_meta
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
     jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
-        '.inbounds += [{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$private,short_id:[$sid]}}}]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+        '.inbounds += [{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$private,short_id:[$sid]}}}]' "$CONFIG_FILE" >"$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
     jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
-        '.nodes += [{protocol:"vless-reality",id:$id,tag:$tag,name:$name,server:$server,port:$port,sni:$sni,uuid:$uuid,public_key:$public,short_id:$sid}]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
-    current_count=$(node_count); current_count=$((current_count + 1))
+        '.nodes += [{protocol:"vless-reality",id:$id,tag:$tag,name:$name,server:$server,port:$port,sni:$sni,uuid:$uuid,public_key:$public,short_id:$sid}]' "$META_FILE" >"$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    current_count=$(node_count)
+    current_count=$((current_count + 1))
     if apply_transaction "$new_config" "$new_meta" "$current_count"; then
         success "节点 [$name] 添加成功"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
     else
-        rm -f "$new_config" "$new_meta"; return 1
+        rm -f "$new_config" "$new_meta"
+        return 1
     fi
 }
 
@@ -652,37 +863,64 @@ add_ss2022_node() {
     read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
     server=${server:-$(server_ip_guess)}
     while [[ -z "$server" ]] || ! valid_text "$server"; do
-        fail '请输入有效的 IP 或域名'; read_input server '  服务器地址: ' || return 1
+        fail '请输入有效的 IP 或域名'
+        read_input server '  服务器地址: ' || return 1
     done
     port="$DEFAULT_SS_PORT"
     while true; do
         read_input port "  监听端口 (默认 $DEFAULT_SS_PORT): " || return 1
         port=${port:-$DEFAULT_SS_PORT}
-        valid_port "$port" || { fail '端口应为 1–65535'; continue; }
+        valid_port "$port" || {
+            fail '端口应为 1–65535'
+            continue
+        }
         port=$((10#$port))
-        port_conflict "$port" "" tcp_udp && { fail "TCP/UDP 端口 $port 已被占用"; continue; }
+        port_conflict "$port" "" tcp_udp && {
+            fail "TCP/UDP 端口 $port 已被占用"
+            continue
+        }
         break
     done
     name="SS2022-$port"
     read_input name "  节点名称 (默认 $name): " || return 1
     name=${name:-"SS2022-$port"}
-    valid_name "$name" || { fail '节点名称不能为空、不能超过 80 字或包含控制字符'; return 1; }
-    password=$("$SINGBOX_BIN" generate rand --base64 16 2>/dev/null) || { fail '生成 Shadowsocks 2022 密码失败'; return 1; }
-    [[ -n "$password" ]] || { fail '生成 Shadowsocks 2022 密码失败'; return 1; }
+    valid_name "$name" || {
+        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
+        return 1
+    }
+    password=$("$SINGBOX_BIN" generate rand --base64 16 2>/dev/null) || {
+        fail '生成 Shadowsocks 2022 密码失败'
+        return 1
+    }
+    [[ -n "$password" ]] || {
+        fail '生成 Shadowsocks 2022 密码失败'
+        return 1
+    }
     id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null || printf '%s' "$(date +%s%N)")
     tag="ss-in-$id"
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
     jq --arg tag "$tag" --arg password "$password" --argjson port "$port" \
-        '.inbounds += [{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+        '.inbounds += [{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$CONFIG_FILE" >"$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
     jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" \
-        '.nodes += [{protocol:"ss2022",id:$id,tag:$tag,name:$name,server:$server,port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
-    current_count=$(node_count); current_count=$((current_count + 1))
+        '.nodes += [{protocol:"ss2022",id:$id,tag:$tag,name:$name,server:$server,port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$META_FILE" >"$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    current_count=$(node_count)
+    current_count=$((current_count + 1))
     if apply_transaction "$new_config" "$new_meta" "$current_count"; then
         success "节点 [$name] 添加成功"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_ss2022_link "$server" "$port" "$password" "$name")" "$NC"
     else
-        rm -f "$new_config" "$new_meta"; return 1
+        rm -f "$new_config" "$new_meta"
+        return 1
     fi
 }
 
@@ -695,12 +933,15 @@ add_node() {
     case "$protocol" in
         1) add_vless_node ;;
         2) add_ss2022_node ;;
-        0|'') return 0 ;;
-        *) fail '无效选择'; return 1 ;;
+        0 | '') return 0 ;;
+        *)
+            fail '无效选择'
+            return 1
+            ;;
     esac
 }
 print_nodes() {
-    jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE" | \
+    jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE" |
         while IFS=$'\t' read -r index name protocol port; do
             printf '  %s[%s]%s %s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$protocol" "$BLUE" "$port" "$NC"
         done
@@ -709,19 +950,35 @@ print_nodes() {
 choose_node() {
     local result="$1" choice count
     count=$(node_count)
-    (( count > 0 )) || { warn '当前没有节点'; return 1; }
+    ((count > 0)) || {
+        warn '当前没有节点'
+        return 1
+    }
     print_nodes
     read_input choice '  请输入节点序号 (0 取消): ' || return 1
-    [[ "$choice" =~ ^[0-9]+$ && ${#choice} -le 6 ]] || { [[ "$choice" == 0 || -z "$choice" ]] && return 1; fail '无效选择'; return 1; }
+    [[ "$choice" =~ ^[0-9]+$ && ${#choice} -le 6 ]] || {
+        [[ "$choice" == 0 || -z "$choice" ]] && return 1
+        fail '无效选择'
+        return 1
+    }
     choice=$((10#$choice))
-    (( choice >= 1 && choice <= count )) || { fail '无效选择'; return 1; }
+    ((choice >= 1 && choice <= count)) || {
+        fail '无效选择'
+        return 1
+    }
     printf -v "$result" '%d' "$((choice - 1))"
 }
 
 view_nodes() {
-    local count; count=$(node_count)
-    printf '\n'; info "=== 当前节点信息（共 ${count} 个） ==="; printf '\n'
-    (( count > 0 )) || { warn '暂无节点'; return 0; }
+    local count
+    count=$(node_count)
+    printf '\n'
+    info "=== 当前节点信息（共 ${count} 个） ==="
+    printf '\n'
+    ((count > 0)) || {
+        warn '暂无节点'
+        return 0
+    }
     while IFS=$'\t' read -r index name protocol port; do
         printf '  %s[%s]%s %s%s%s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$((index - 1))")" "$NC"
@@ -733,18 +990,35 @@ apply_vless_node_update() {
     local index="$1" tag="$2" name="$3" server="$4" port="$5" sni="$6" uuid="$7" public="$8" sid="$9" private="${10}"
     local new_config new_meta count config_matches meta_matches
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
-    config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE" 2>/dev/null) || { rm -f "$new_config" "$new_meta"; fail '目标节点配置读取失败'; return 1; }
-    meta_matches=$(jq -r --arg tag "$tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE" 2>/dev/null) || { rm -f "$new_config" "$new_meta"; fail '目标节点元数据读取失败'; return 1; }
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
+    config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE" 2>/dev/null) || {
+        rm -f "$new_config" "$new_meta"
+        fail '目标节点配置读取失败'
+        return 1
+    }
+    meta_matches=$(jq -r --arg tag "$tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE" 2>/dev/null) || {
+        rm -f "$new_config" "$new_meta"
+        fail '目标节点元数据读取失败'
+        return 1
+    }
     if [[ "$config_matches" != 1 || "$meta_matches" != 1 ]]; then
         rm -f "$new_config" "$new_meta"
         fail '目标节点信息不一致，未应用修改，请重新进入菜单'
         return 1
     fi
     jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
-        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.handshake |= del(.domain_resolver) | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
+        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.handshake |= del(.domain_resolver) | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" >"$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
     jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
-        '(.nodes[] | select(.tag==$tag)) |= (.protocol=(.protocol // "vless-reality") | .name=$name | .server=$server | .port=$port | .sni=$sni | .uuid=$uuid | .public_key=$public | .short_id=$sid)' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
+        '(.nodes[] | select(.tag==$tag)) |= (.protocol=(.protocol // "vless-reality") | .name=$name | .server=$server | .port=$port | .sni=$sni | .uuid=$uuid | .public_key=$public | .short_id=$sid)' "$META_FILE" >"$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
     if ! jq -e --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
         'any(.inbounds[]?; .tag==$tag and (.listen_port|tonumber?)==$port and .users[0].uuid==$uuid and .tls.server_name==$sni and .tls.reality.handshake.server==$sni and .tls.reality.private_key==$private and ((.tls.reality.short_id // []) | index($sid)) != null)' "$new_config" >/dev/null 2>&1; then
         rm -f "$new_config" "$new_meta"
@@ -761,13 +1035,19 @@ apply_vless_node_update() {
     if apply_transaction "$new_config" "$new_meta" "$count"; then
         success "节点 [$name] 修改成功"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name")" "$NC"
-    else rm -f "$new_config" "$new_meta"; return 1; fi
+    else
+        rm -f "$new_config" "$new_meta"
+        return 1
+    fi
 }
 
 confirm_node_update() {
     local answer
     read_input answer '  确认保存并应用本次修改？[Y/N]: ' || return 1
-    [[ "$answer" =~ ^[nN]$ ]] && { warn '已取消本次修改'; return 1; }
+    [[ "$answer" =~ ^[nN]$ ]] && {
+        warn '已取消本次修改'
+        return 1
+    }
     return 0
 }
 
@@ -781,8 +1061,13 @@ modify_vless_node() {
             while [[ $field == *$'\n' ]]; do field=${field%$'\n'}; done
             fields+=("$field")
         done < <(node_fields "$index")
-        name=${fields[3]-}; server=${fields[1]-}; port=${fields[2]-}; sni=${fields[5]-}
-        uuid=${fields[4]-}; public=${fields[6]-}; sid=${fields[7]-}
+        name=${fields[3]-}
+        server=${fields[1]-}
+        port=${fields[2]-}
+        sni=${fields[5]-}
+        uuid=${fields[4]-}
+        public=${fields[6]-}
+        sid=${fields[7]-}
         private=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.reality.private_key' "$CONFIG_FILE")
         printf '\n  当前节点: %s%s%s (vless-reality) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改 UUID\n  %s[5]%s 修改伪装域名/SNI\n  %s[6]%s 重新生成 Reality 密钥和 Short ID\n  %s[0]%s 返回\n' \
@@ -797,13 +1082,19 @@ modify_vless_node() {
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                valid_name "$value" || { fail '节点名称无效'; continue; }
+                valid_name "$value" || {
+                    fail '节点名称无效'
+                    continue
+                }
                 printf '  节点名称：%s\n' "$value"
                 if [[ "$value" == "$name" ]]; then
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
                 apply_vless_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
@@ -815,13 +1106,19 @@ modify_vless_node() {
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                valid_text "$value" || { fail '客户端连接地址无效'; continue; }
+                valid_text "$value" || {
+                    fail '客户端连接地址无效'
+                    continue
+                }
                 printf '  客户端连接地址：%s\n' "$value"
                 if [[ "$value" == "$server" ]]; then
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
                 apply_vless_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
@@ -833,18 +1130,24 @@ modify_vless_node() {
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                valid_port "$value" || { fail '端口应为 1–65535'; continue; }
+                valid_port "$value" || {
+                    fail '端口应为 1–65535'
+                    continue
+                }
                 value=$((10#$value))
-                if (( value != port )) && port_conflict "$value" "$tag"; then
+                if ((value != port)) && port_conflict "$value" "$tag"; then
                     fail "TCP 端口 $value 已被占用"
                     continue
                 fi
                 printf '  监听端口：%s\n' "$value"
-                if (( value == port )); then
+                if ((value == port)); then
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$value" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
@@ -853,15 +1156,24 @@ modify_vless_node() {
                 read_input value '  请输入新 UUID (回车随机生成): ' || return 1
                 if [[ -z "$value" ]]; then
                     value=$($SINGBOX_BIN generate uuid 2>/dev/null)
-                    [[ -n "$value" ]] || { fail 'UUID 自动生成失败'; continue; }
+                    [[ -n "$value" ]] || {
+                        fail 'UUID 自动生成失败'
+                        continue
+                    }
                 fi
-                [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]] || { fail 'UUID 格式无效'; continue; }
+                [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]] || {
+                    fail 'UUID 格式无效'
+                    continue
+                }
                 printf '  UUID：%s\n' "$value"
                 if [[ "$value" == "$uuid" ]]; then
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$value" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
@@ -873,22 +1185,34 @@ modify_vless_node() {
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                valid_text "$value" || { fail '伪装域名格式无效'; continue; }
+                valid_text "$value" || {
+                    fail '伪装域名格式无效'
+                    continue
+                }
                 printf '  伪装域名/SNI：%s\n' "$value"
                 if [[ "$value" == "$sni" ]]; then
                     pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             6)
-                generate_credentials || { fail '生成新凭据失败'; continue; }
+                generate_credentials || {
+                    fail '生成新凭据失败'
+                    continue
+                }
                 printf '  Reality 私钥：%s\n  Reality 公钥：%s\n  Short ID：%s\n' \
                     "$NEW_PRIVATE" "$NEW_PUBLIC" "$NEW_SHORT_ID"
-                confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$uuid" "$NEW_PUBLIC" "$NEW_SHORT_ID" "$NEW_PRIVATE" || return 1
                 pause_enter '  按回车返回修改节点菜单...'
                 continue
@@ -901,17 +1225,50 @@ modify_vless_node() {
 apply_ss2022_node_update() {
     local tag="$1" name="$2" server="$3" port="$4" password="$5" method="$SS2022_METHOD"
     local new_config new_meta count config_matches meta_matches
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1; new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
-    config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE") || { rm -f "$new_config" "$new_meta"; return 1; }
-    meta_matches=$(jq -r --arg tag "$tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE") || { rm -f "$new_config" "$new_meta"; return 1; }
-    [[ "$config_matches" == 1 && "$meta_matches" == 1 ]] || { rm -f "$new_config" "$new_meta"; fail '目标节点信息不一致，未应用修改，请重新进入菜单'; return 1; }
-    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
-    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '(.nodes[] | select(.tag==$tag)) |= (.protocol="ss2022" | .name=$name | .server=$server | .port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
-    jq -e --arg tag "$tag" --arg password "$password" --argjson port "$port" 'any(.inbounds[]?; .tag==$tag and .type=="shadowsocks" and (.listen_port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_config" >/dev/null 2>&1 || { rm -f "$new_config" "$new_meta"; fail 'Shadowsocks 配置修改结果校验失败'; return 1; }
-    jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" 'any(.nodes[]?; .tag==$tag and (.protocol // "vless-reality")=="ss2022" and .name==$name and .server==$server and (.port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_meta" >/dev/null 2>&1 || { rm -f "$new_config" "$new_meta"; fail 'Shadowsocks 元数据修改结果校验失败'; return 1; }
-    count=$(node_count); if apply_transaction "$new_config" "$new_meta" "$count"; then
-        success "节点 [$name] 修改成功"; printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_ss2022_link "$server" "$port" "$password" "$name")" "$NC"
-    else rm -f "$new_config" "$new_meta"; return 1; fi
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
+    config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE") || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    meta_matches=$(jq -r --arg tag "$tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE") || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    [[ "$config_matches" == 1 && "$meta_matches" == 1 ]] || {
+        rm -f "$new_config" "$new_meta"
+        fail '目标节点信息不一致，未应用修改，请重新进入菜单'
+        return 1
+    }
+    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$CONFIG_FILE" >"$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '(.nodes[] | select(.tag==$tag)) |= (.protocol="ss2022" | .name=$name | .server=$server | .port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$META_FILE" >"$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq -e --arg tag "$tag" --arg password "$password" --argjson port "$port" 'any(.inbounds[]?; .tag==$tag and .type=="shadowsocks" and (.listen_port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_config" >/dev/null 2>&1 || {
+        rm -f "$new_config" "$new_meta"
+        fail 'Shadowsocks 配置修改结果校验失败'
+        return 1
+    }
+    jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" 'any(.nodes[]?; .tag==$tag and (.protocol // "vless-reality")=="ss2022" and .name==$name and .server==$server and (.port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_meta" >/dev/null 2>&1 || {
+        rm -f "$new_config" "$new_meta"
+        fail 'Shadowsocks 元数据修改结果校验失败'
+        return 1
+    }
+    count=$(node_count)
+    if apply_transaction "$new_config" "$new_meta" "$count"; then
+        success "节点 [$name] 修改成功"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_ss2022_link "$server" "$port" "$password" "$name")" "$NC"
+    else
+        rm -f "$new_config" "$new_meta"
+        return 1
+    fi
 }
 
 modify_ss2022_node() {
@@ -924,16 +1281,94 @@ modify_ss2022_node() {
             while [[ $field == *$'\n' ]]; do field=${field%$'\n'}; done
             fields+=("$field")
         done < <(node_fields "$index")
-        name=${fields[3]-}; server=${fields[1]-}; port=${fields[2]-}; password=${fields[8]-}
+        name=${fields[3]-}
+        server=${fields[1]-}
+        port=${fields[2]-}
+        password=${fields[8]-}
         printf '\n  当前节点: %s%s%s (ss2022) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 重新生成密码\n  %s[0]%s 返回\n' "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
         case "$choice" in
             0) return 0 ;;
-            1) read_input value "  请输入新节点名称 (回车保持 $name): " || return 1; value=${value:-$name}; valid_name "$value" || { fail '节点名称无效'; continue; }; printf '  节点名称：%s\n' "$value"; [[ "$value" == "$name" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }; apply_ss2022_node_update "$tag" "$value" "$server" "$port" "$password" || return 1; pause_enter '  按回车返回修改节点菜单...' ;;
-            2) read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1; value=${value:-$server}; valid_text "$value" || { fail '客户端连接地址无效'; continue; }; printf '  客户端连接地址：%s\n' "$value"; [[ "$value" == "$server" ]] && { pause_enter '  按回车返回修改节点菜单...'; continue; }; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }; apply_ss2022_node_update "$tag" "$name" "$value" "$port" "$password" || return 1; pause_enter '  按回车返回修改节点菜单...' ;;
-            3) read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1; value=${value:-$port}; valid_port "$value" || { fail '端口应为 1–65535'; continue; }; value=$((10#$value)); if (( value != port )) && port_conflict "$value" "$tag" tcp_udp; then fail "TCP/UDP 端口 $value 已被占用"; continue; fi; printf '  监听端口：%s\n' "$value"; (( value == port )) && { pause_enter '  按回车返回修改节点菜单...'; continue; }; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }; apply_ss2022_node_update "$tag" "$name" "$server" "$value" "$password" || return 1; pause_enter '  按回车返回修改节点菜单...' ;;
-            4) value=$("$SINGBOX_BIN" generate rand --base64 16 2>/dev/null) || { fail '生成 Shadowsocks 2022 密码失败'; continue; }; [[ -n "$value" ]] || { fail '生成 Shadowsocks 2022 密码失败'; continue; }; printf '  密码：%s\n' "$value"; confirm_node_update || { (( MENU_CANCELLED )) && return 1; continue; }; apply_ss2022_node_update "$tag" "$name" "$server" "$port" "$value" || return 1; pause_enter '  按回车返回修改节点菜单...' ;;
+            1)
+                read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
+                value=${value:-$name}
+                valid_name "$value" || {
+                    fail '节点名称无效'
+                    continue
+                }
+                printf '  节点名称：%s\n' "$value"
+                [[ "$value" == "$name" ]] && {
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
+                apply_ss2022_node_update "$tag" "$value" "$server" "$port" "$password" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
+                ;;
+            2)
+                read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1
+                value=${value:-$server}
+                valid_text "$value" || {
+                    fail '客户端连接地址无效'
+                    continue
+                }
+                printf '  客户端连接地址：%s\n' "$value"
+                [[ "$value" == "$server" ]] && {
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
+                apply_ss2022_node_update "$tag" "$name" "$value" "$port" "$password" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
+                ;;
+            3)
+                read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
+                value=${value:-$port}
+                valid_port "$value" || {
+                    fail '端口应为 1–65535'
+                    continue
+                }
+                value=$((10#$value))
+                if ((value != port)) && port_conflict "$value" "$tag" tcp_udp; then
+                    fail "TCP/UDP 端口 $value 已被占用"
+                    continue
+                fi
+                printf '  监听端口：%s\n' "$value"
+                ((value == port)) && {
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                }
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
+                apply_ss2022_node_update "$tag" "$name" "$server" "$value" "$password" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
+                ;;
+            4)
+                value=$("$SINGBOX_BIN" generate rand --base64 16 2>/dev/null) || {
+                    fail '生成 Shadowsocks 2022 密码失败'
+                    continue
+                }
+                [[ -n "$value" ]] || {
+                    fail '生成 Shadowsocks 2022 密码失败'
+                    continue
+                }
+                printf '  密码：%s\n' "$value"
+                confirm_node_update || {
+                    ((MENU_CANCELLED)) && return 1
+                    continue
+                }
+                apply_ss2022_node_update "$tag" "$name" "$server" "$port" "$value" || return 1
+                pause_enter '  按回车返回修改节点菜单...'
+                ;;
             *) fail '无效选择' ;;
         esac
     done
@@ -947,7 +1382,10 @@ modify_node() {
     case "$protocol" in
         vless-reality) modify_vless_node "$index" ;;
         ss2022) modify_ss2022_node "$index" ;;
-        *) fail '节点协议不受支持'; return 1 ;;
+        *)
+            fail '节点协议不受支持'
+            return 1
+            ;;
     esac
 }
 
@@ -959,10 +1397,20 @@ delete_node() {
     read_input answer "  确认删除节点 [$name]？(Y/N): " || return 1
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
-    jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
-    jq --arg tag "$tag" 'del(.nodes[] | select(.tag==$tag))' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
-    count=$(node_count); count=$((count - 1))
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
+    jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" >"$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq --arg tag "$tag" 'del(.nodes[] | select(.tag==$tag))' "$META_FILE" >"$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    count=$(node_count)
+    count=$((count - 1))
     if apply_transaction "$new_config" "$new_meta" "$count"; then
         success "节点 [$name] 已删除"
     else
@@ -973,13 +1421,26 @@ delete_node() {
 
 clear_nodes() {
     local count answer new_config new_meta
-    count=$(node_count); (( count > 0 )) || { warn '暂无节点'; return 0; }
+    count=$(node_count)
+    ((count > 0)) || {
+        warn '暂无节点'
+        return 0
+    }
     read_input answer "  确认清空全部 $count 个节点？(Y/N): " || return 1
     [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || { rm -f "$new_config"; return 1; }
-    jq '.inbounds=[]' "$CONFIG_FILE" > "$new_config" || { rm -f "$new_config" "$new_meta"; return 1; }
-    jq '.nodes=[]' "$META_FILE" > "$new_meta" || { rm -f "$new_config" "$new_meta"; return 1; }
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
+    jq '.inbounds=[]' "$CONFIG_FILE" >"$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq '.nodes=[]' "$META_FILE" >"$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
     if apply_transaction "$new_config" "$new_meta" 0; then
         success '所有节点已清空'
     else
@@ -987,50 +1448,98 @@ clear_nodes() {
         return 1
     fi
 }
+# 服务菜单动作、脚本更新与卸载
 start_service() {
-    (( $(node_count) > 0 )) || { warn '暂无节点，无法启动 sing-box'; return 1; }
-    require_core || return 1; write_service_unit || return 1
+    (($(node_count) > 0)) || {
+        warn '暂无节点，无法启动 sing-box'
+        return 1
+    }
+    require_core || return 1
+    write_service_unit || return 1
     if ! svc_enabled; then
-        svc_enable || { fail '设置开机自启失败'; return 1; }
+        svc_enable || {
+            fail '设置开机自启失败'
+            return 1
+        }
     fi
-    svc_active && { success 'sing-box 已在运行'; return 0; }
-    svc_start && success 'sing-box 已启动，开机自启已开启' || { fail 'sing-box 启动失败，请查看日志'; return 1; }
+    svc_active && {
+        success 'sing-box 已在运行'
+        return 0
+    }
+    svc_start && success 'sing-box 已启动，开机自启已开启' || {
+        fail 'sing-box 启动失败，请查看日志'
+        return 1
+    }
 }
 stop_service() {
-    svc_stop || { fail 'sing-box 停止失败'; return 1; }
+    svc_stop || {
+        fail 'sing-box 停止失败'
+        return 1
+    }
     svc_disable >/dev/null 2>&1 || true
     success 'sing-box 已停止，开机自启已关闭'
 }
 restart_service() {
-    (( $(node_count) > 0 )) || { warn '暂无节点，无法重启 sing-box'; return 1; }
+    (($(node_count) > 0)) || {
+        warn '暂无节点，无法重启 sing-box'
+        return 1
+    }
     require_core || return 1
     write_service_unit || return 1
     if ! svc_enabled; then
-        svc_enable || { fail '设置开机自启失败，未执行重启'; return 1; }
+        svc_enable || {
+            fail '设置开机自启失败，未执行重启'
+            return 1
+        }
     fi
-    svc_restart && success 'sing-box 已重启，开机自启已开启' || { fail 'sing-box 重启失败'; return 1; }
+    svc_restart && success 'sing-box 已重启，开机自启已开启' || {
+        fail 'sing-box 重启失败'
+        return 1
+    }
 }
 update_script() (
     local temp first version old_hash new_hash target
     info '正在检查管理脚本更新'
     temp=$(mktemp "${SINGBOX_DIR}/.script.XXXXXX") || exit 1
     trap 'rm -f "$temp"' EXIT INT TERM
-    get_url "${SCRIPT_URL}?v=$$-$RANDOM" "$temp" || { fail '管理脚本下载失败'; exit 1; }
-    IFS= read -r first < "$temp" || true
-    [[ "$first" == '#!/usr/bin/env bash' || "$first" == '#!/bin/bash' ]] || { fail '下载内容不是有效 Bash 脚本'; exit 1; }
-    bash -n "$temp" || { fail '新版管理脚本语法检查失败'; exit 1; }
+    get_url "${SCRIPT_URL}?v=$$-$RANDOM" "$temp" || {
+        fail '管理脚本下载失败'
+        exit 1
+    }
+    IFS= read -r first <"$temp" || true
+    [[ "$first" == '#!/usr/bin/env bash' || "$first" == '#!/bin/bash' ]] || {
+        fail '下载内容不是有效 Bash 脚本'
+        exit 1
+    }
+    bash -n "$temp" || {
+        fail '新版管理脚本语法检查失败'
+        exit 1
+    }
     version=$(awk -F'"' '/^SCRIPT_VERSION=/{print $2; exit}' "$temp")
-    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { fail '新版脚本缺少有效版本号'; exit 1; }
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+        fail '新版脚本缺少有效版本号'
+        exit 1
+    }
     target="${SCRIPT_TARGET:-/usr/local/bin/s}"
-    old_hash=$(sha256sum "$target" 2>/dev/null | awk '{print $1}' || true); new_hash=$(sha256sum "$temp" | awk '{print $1}')
-    [[ -n "$old_hash" && "$old_hash" == "$new_hash" ]] && { info "管理脚本已是最新版本 v$version"; exit 0; }
-    chmod 755 "$temp" && mv -f "$temp" "$target" || { fail '管理脚本替换失败'; exit 1; }
+    old_hash=$(sha256sum "$target" 2>/dev/null | awk '{print $1}' || true)
+    new_hash=$(sha256sum "$temp" | awk '{print $1}')
+    [[ -n "$old_hash" && "$old_hash" == "$new_hash" ]] && {
+        info "管理脚本已是最新版本 v$version"
+        exit 0
+    }
+    chmod 755 "$temp" && mv -f "$temp" "$target" || {
+        fail '管理脚本替换失败'
+        exit 1
+    }
     trap - EXIT INT TERM
     success "管理脚本已更新至 v$version"
 )
 
 update_management_script() {
-    update_script || { fail '管理脚本更新失败'; return 1; }
+    update_script || {
+        fail '管理脚本更新失败'
+        return 1
+    }
 }
 
 uninstall() {
@@ -1057,6 +1566,7 @@ uninstall() {
     success 'sing-box 及其相关文件已卸载'
 }
 
+# 菜单绘制与脚本入口
 display_width() {
     printf '%s' "$1" | LC_ALL=C awk '
         BEGIN {
@@ -1101,7 +1611,8 @@ menu_row() {
     local text="$1" width pad
     width=$(display_width "$text")
     [[ "$width" =~ ^[0-9]+$ ]] || width=0
-    pad=$((39-width)); (( pad > 0 )) || pad=0
+    pad=$((39 - width))
+    ((pad > 0)) || pad=0
     printf '  %s║%s%*s%s║%s\n' "$BLUE" "$text" "$pad" '' "$BLUE" "$NC"
 }
 
@@ -1141,45 +1652,84 @@ menu() {
         printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
         local status=0
         read -r -p '  请输入选项 [0-11]: ' choice || status=$?
-        (( status == 130 )) && interrupt_exit
-        (( status != 0 )) && return 0
+        ((status == 130)) && interrupt_exit
+        ((status != 0)) && return 0
         case "$choice" in
             1) add_node ;; 2) view_nodes ;; 3) modify_node ;; 4) delete_node ;; 5) clear_nodes ;;
-            6) printf '\n'; info '启动 sing-box'; start_service ;;
-            7) printf '\n'; info '停止 sing-box'; stop_service ;;
-            8) printf '\n'; info '重启 sing-box'; restart_service ;;
+            6)
+                printf '\n'
+                info '启动 sing-box'
+                start_service
+                ;;
+            7)
+                printf '\n'
+                info '停止 sing-box'
+                stop_service
+                ;;
+            8)
+                printf '\n'
+                info '重启 sing-box'
+                restart_service
+                ;;
             9) update_core ;;
             10)
                 if update_management_script; then
                     pause_enter '  按回车加载最新脚本...'
-                    (( INPUT_EOF )) && return 0
+                    ((INPUT_EOF)) && return 0
                     exec bash "${SCRIPT_TARGET:-$0}"
                 fi
                 ;;
             11) uninstall && return 0 ;; 0) return 0 ;;
             *) fail '无效选项' ;;
         esac
-        (( MENU_CANCELLED )) || pause_enter
-        (( INPUT_EOF )) && return 0
+        ((MENU_CANCELLED)) || pause_enter
+        ((INPUT_EOF)) && return 0
     done
 }
 
 main() {
-    [[ "$(uname -s)" == Linux && "$EUID" == 0 ]] || { fail '请在 Linux VPS/容器中以 root 或 sudo 运行'; return 1; }
-    detect_init; ensure_dependencies || return 1; mkdir -p /run/lock || return 1; mkdir -p "$SINGBOX_DIR" || return 1
+    [[ "$(uname -s)" == Linux && "$EUID" == 0 ]] || {
+        fail '请在 Linux VPS/容器中以 root 或 sudo 运行'
+        return 1
+    }
+    detect_init
+    ensure_dependencies || return 1
+    mkdir -p /run/lock || return 1
+    mkdir -p "$SINGBOX_DIR" || return 1
     acquire_manager_lock || return 1
     init_state || return 1
     maintenance_cleanup
     resolve_core >/dev/null 2>&1 || true
     SCRIPT_TARGET="${SCRIPT_TARGET:-/usr/local/bin/s}"
     case "${1:-}" in
-        --version|-v) printf 'singbox 管理脚本 v%s\n' "$SCRIPT_VERSION"; return 0 ;;
-        --help|-h) printf '用法: s [--update|--update-script|--uninstall|--version]\n'; return 0 ;;
-        --update) update_core; return $? ;;
-        --update-script) update_management_script; return $? ;;
-        --uninstall) uninstall; return $? ;;
-        '') menu; return $? ;;
-        *) fail "未知参数: $1"; return 1 ;;
+        --version | -v)
+            printf 'singbox 管理脚本 v%s\n' "$SCRIPT_VERSION"
+            return 0
+            ;;
+        --help | -h)
+            printf '用法: s [--update|--update-script|--uninstall|--version]\n'
+            return 0
+            ;;
+        --update)
+            update_core
+            return $?
+            ;;
+        --update-script)
+            update_management_script
+            return $?
+            ;;
+        --uninstall)
+            uninstall
+            return $?
+            ;;
+        '')
+            menu
+            return $?
+            ;;
+        *)
+            fail "未知参数: $1"
+            return 1
+            ;;
     esac
 }
 
