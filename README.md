@@ -2,7 +2,7 @@
 
 面向 Linux VPS 的轻量 sing-box 管理脚本，支持 VLESS + Reality + Vision 和 Shadowsocks 2022 节点管理
 
-当前管理脚本版本：`1.1.7`
+当前管理脚本版本：`1.1.8`
 
 ## 功能
 
@@ -10,8 +10,9 @@
 - Shadowsocks 2022 默认监听端口 `8388`
 - Shadowsocks 2022 固定使用 `2022-blake3-aes-128-gcm`
 - 自动生成协议凭据并输出对应节点链接
+- VLESS 和 Shadowsocks 2022 保留 `::` 双栈入站，代理目标、DNS 上游和 Reality 握手仅使用 IPv4；IPv6 目标会被拒绝
 - 支持 systemd、Alpine OpenRC 和无 init 环境
-- 支持三种协议的添加、查看、修改、删除、清空、分享链接和服务管理
+- 支持两种协议的添加、查看、修改、删除、清空、分享链接和服务管理
 - 支持核心安装更新、管理脚本更新和卸载；事务失败会保留恢复备份并恢复服务状态
 - OpenRC/direct 日志超过 10 MiB 时自动轮转，保留最近 5 MiB 和最多 3 个轮转文件
 - 启动时清理超过 24 小时的更新临时文件，不删除配置和节点数据
@@ -32,7 +33,7 @@
 sing-box 管理（当前节点：0 个）
 sing-box 状态：未安装
 sing-box 版本：未安装
-管理脚本版本：v1.1.7
+管理脚本版本：v1.1.8
 
 基础功能
 [1]  添加节点
@@ -54,7 +55,7 @@ sing-box 版本：未安装
 [0]  退出脚本
 ```
 
-添加节点时选择 VLESS + Reality + Vision 或 Shadowsocks 2022 协议。旧版 `nodes.json` 中没有 `protocol` 字段的节点按 VLESS + Reality + Vision 处理。卸载只清理本项目创建的 sing-box 配置、核心、服务、日志、锁、临时文件和管理命令，系统预先存在的外部核心和共享依赖会保留
+添加节点时选择 VLESS + Reality + Vision 或 Shadowsocks 2022 协议。旧版 `nodes.json` 中没有 `protocol` 字段的节点按 VLESS + Reality + Vision 处理。脚本首次运行会幂等迁移 IPv4 出站策略，保留节点、端口和凭据；配置已符合策略时不会重启服务。卸载只清理本项目创建的 sing-box 配置、核心、服务、日志、锁、临时文件和管理命令，系统预先存在的外部核心和共享依赖会保留
 
 ## 主要路径
 
