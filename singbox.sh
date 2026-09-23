@@ -76,11 +76,16 @@ rotate_file_log() {
 
 cleanup_stale_temp_files() {
     local directory=$1 pattern
+    local -a find_args
     shift
     [[ -d $directory ]] || return 0
+    (($#)) || return 0
+    find_args=("$directory" -mindepth 1 -maxdepth 1 -mmin "+$TEMP_RETENTION_MINUTES" \()
     for pattern in "$@"; do
-        find "$directory" -mindepth 1 -maxdepth 1 -name "$pattern" -mmin +"$TEMP_RETENTION_MINUTES" -exec rm -rf -- {} + 2>/dev/null || true
+        find_args+=(-name "$pattern" -o)
     done
+    find_args+=(-false \) -exec rm -rf -- {} +)
+    find "${find_args[@]}" 2>/dev/null || true
 }
 
 maintenance_cleanup() {
@@ -396,6 +401,15 @@ init_state() {
 
 node_count() { jq -r '.nodes | length' "$META_FILE"; }
 
+# 以 NUL 分隔读取节点字段，避免同一节点反复启动 jq；节点输入校验已拒绝控制字符。
+node_fields() {
+    jq -j --argjson i "$1" '
+        .nodes[$i]
+        | [(.protocol // "vless-reality"), .server, .port, .name,
+           .uuid, .sni, .public_key, .short_id, .password]
+        | .[] | tostring + "\u0000"' "$META_FILE"
+}
+
 port_conflict() {
     local port="$1" exclude="${2:-}" mode="${3:-tcp}"
     jq -e --argjson p "$port" --arg e "$exclude" '.nodes[]? | select((.port|tonumber) == $p and ($e == "" or (.tag // "") != $e))' "$META_FILE" >/dev/null 2>&1 && return 0
@@ -433,20 +447,19 @@ build_ss2022_link() {
 }
 
 build_node_link() {
-    local index="$1" protocol server port name
-    protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
-    server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE")
-    port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE")
-    name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
+    local index="$1" protocol server port name uuid sni public sid password value
+    local -a fields=()
+    while IFS= read -r -d '' value; do
+        while [[ $value == *$'\n' ]]; do value=${value%$'\n'}; done
+        fields+=("$value")
+    done < <(node_fields "$index")
+    protocol=${fields[0]-}; server=${fields[1]-}; port=${fields[2]-}; name=${fields[3]-}
+    uuid=${fields[4]-}; sni=${fields[5]-}; public=${fields[6]-}; sid=${fields[7]-}; password=${fields[8]-}
     case "$protocol" in
         vless-reality)
-            build_vless_link "$server" "$port" \
-                "$(jq -r --argjson i "$index" '.nodes[$i].uuid' "$META_FILE")" \
-                "$(jq -r --argjson i "$index" '.nodes[$i].sni' "$META_FILE")" \
-                "$(jq -r --argjson i "$index" '.nodes[$i].public_key' "$META_FILE")" \
-                "$(jq -r --argjson i "$index" '.nodes[$i].short_id' "$META_FILE")" "$name"
+            build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name"
             ;;
-        ss2022) build_ss2022_link "$server" "$port" "$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")" "$name" ;;
+        ss2022) build_ss2022_link "$server" "$port" "$password" "$name" ;;
         *) return 1 ;;
     esac
 }
@@ -759,16 +772,17 @@ confirm_node_update() {
 }
 
 modify_vless_node() {
-    local index="$1" tag name server port sni uuid public sid private choice value
+    local index="$1" tag name server port sni uuid public sid private choice value field
+    local -a fields
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
-        name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
-        server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE")
-        port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE")
-        sni=$(jq -r --argjson i "$index" '.nodes[$i].sni' "$META_FILE")
-        uuid=$(jq -r --argjson i "$index" '.nodes[$i].uuid' "$META_FILE")
-        public=$(jq -r --argjson i "$index" '.nodes[$i].public_key' "$META_FILE")
-        sid=$(jq -r --argjson i "$index" '.nodes[$i].short_id' "$META_FILE")
+        fields=()
+        while IFS= read -r -d '' field; do
+            while [[ $field == *$'\n' ]]; do field=${field%$'\n'}; done
+            fields+=("$field")
+        done < <(node_fields "$index")
+        name=${fields[3]-}; server=${fields[1]-}; port=${fields[2]-}; sni=${fields[5]-}
+        uuid=${fields[4]-}; public=${fields[6]-}; sid=${fields[7]-}
         private=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.reality.private_key' "$CONFIG_FILE")
         printf '\n  当前节点: %s%s%s (vless-reality) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改 UUID\n  %s[5]%s 修改伪装域名/SNI\n  %s[6]%s 重新生成 Reality 密钥和 Short ID\n  %s[0]%s 返回\n' \
@@ -901,10 +915,16 @@ apply_ss2022_node_update() {
 }
 
 modify_ss2022_node() {
-    local index="$1" tag name server port password choice value
+    local index="$1" tag name server port password choice value field
+    local -a fields
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
-        name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE"); server=$(jq -r --argjson i "$index" '.nodes[$i].server' "$META_FILE"); port=$(jq -r --argjson i "$index" '.nodes[$i].port' "$META_FILE"); password=$(jq -r --argjson i "$index" '.nodes[$i].password' "$META_FILE")
+        fields=()
+        while IFS= read -r -d '' field; do
+            while [[ $field == *$'\n' ]]; do field=${field%$'\n'}; done
+            fields+=("$field")
+        done < <(node_fields "$index")
+        name=${fields[3]-}; server=${fields[1]-}; port=${fields[2]-}; password=${fields[8]-}
         printf '\n  当前节点: %s%s%s (ss2022) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 重新生成密码\n  %s[0]%s 返回\n' "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
@@ -1039,8 +1059,12 @@ uninstall() {
 
 display_width() {
     printf '%s' "$1" | LC_ALL=C awk '
-        BEGIN { for (i = 0; i < 256; i++) ord[sprintf("%c", i)] = i }
+        BEGIN {
+            for (i = 0; i < 256; i++) ord[sprintf("%c", i)] = i
+            escape = sprintf("%c", 27)
+        }
         {
+            gsub(escape "\\[[0-9;]*m", "")
             width = 0
             bytes = length($0)
             for (i = 1; i <= bytes; i++) {
@@ -1074,9 +1098,8 @@ display_width() {
 }
 
 menu_row() {
-    local text="$1" plain width pad
-    plain=$(printf '%s' "$text" | sed $'s/\033\\[[0-9;]*m//g')
-    width=$(display_width "$plain")
+    local text="$1" width pad
+    width=$(display_width "$text")
     [[ "$width" =~ ^[0-9]+$ ]] || width=0
     pad=$((39-width)); (( pad > 0 )) || pad=0
     printf '  %s║%s%*s%s║%s\n' "$BLUE" "$text" "$pad" '' "$BLUE" "$NC"
