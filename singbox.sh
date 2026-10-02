@@ -6,7 +6,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # 运行时路径与版本
-SCRIPT_VERSION="1.2.3"
+SCRIPT_VERSION="1.2.5"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -926,7 +926,7 @@ add_ss2022_node() {
 add_node() {
     local protocol
     require_core || return 1
-    printf '\n  请选择协议:\n\n  %s[1]%s VLESS + Reality + Vision\n  %s[2]%s Shadowsocks 2022\n  %s[0]%s 返回\n' \
+    printf '\n  请选择协议:\n\n  %s[1]%s Vless + Reality + Vision\n  %s[2]%s Shadowsocks 2022\n  %s[0]%s 返回\n' \
         "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
     read_input protocol '  请选择协议: ' || return 1
     case "$protocol" in
@@ -979,7 +979,7 @@ view_nodes() {
         return 0
     }
     while IFS=$'\t' read -r index name protocol port; do
-        printf '  %s[%s]%s %s%s%s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
+        printf '  [%s] %s (%s) @ %s\n' "$index" "$name" "$protocol" "$port"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$((index - 1))")" "$NC"
         printf '\n'
     done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE")
