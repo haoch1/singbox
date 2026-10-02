@@ -2,7 +2,7 @@
 
 面向 Linux VPS 的轻量 sing-box 节点管理脚本，支持 VLESS + Reality + Vision 和 Shadowsocks 2022
 
-当前管理脚本版本：`1.2.6`
+当前管理脚本版本：`1.2.7`
 
 ## 功能
 
@@ -31,7 +31,7 @@
 sing-box 管理（当前节点：0 个）
 sing-box 状态：未安装
 sing-box 版本：未安装
-管理脚本版本：v1.2.6
+管理脚本版本：v1.2.7
 
 基础功能
 [1]  添加节点

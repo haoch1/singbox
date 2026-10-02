@@ -6,7 +6,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # 运行时路径与版本
-SCRIPT_VERSION="1.2.6"
+SCRIPT_VERSION="1.2.7"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -956,11 +956,15 @@ choose_node() {
     print_nodes
     read_input choice '  请输入节点序号 (0 取消): ' || return 1
     [[ "$choice" =~ ^[0-9]+$ && ${#choice} -le 6 ]] || {
-        [[ "$choice" == 0 || -z "$choice" ]] && return 1
+        [[ -z "$choice" ]] && return 1
         fail '无效选择'
         return 1
     }
     choice=$((10#$choice))
+    ((choice == 0)) && {
+        MENU_CANCELLED=1
+        return 1
+    }
     ((choice >= 1 && choice <= count)) || {
         fail '无效选择'
         return 1
