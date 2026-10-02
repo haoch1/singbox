@@ -6,7 +6,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # 运行时路径与版本
-SCRIPT_VERSION="1.2.8"
+SCRIPT_VERSION="1.2.7"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -903,8 +903,7 @@ add_ss2022_node() {
         return 1
     }
     jq --arg tag "$tag" --arg password "$password" --argjson port "$port" \
-        '.inbounds += [{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]
-         | .ntp = ((.ntp // {}) | .enabled = true | .server = (if (.server // "") == "" then "162.159.200.1" else .server end))' "$CONFIG_FILE" >"$new_config" || {
+        '.inbounds += [{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$CONFIG_FILE" >"$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
