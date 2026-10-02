@@ -2,13 +2,14 @@
 
 面向 Linux VPS 的轻量 sing-box 节点管理脚本，支持 VLESS + Reality + Vision 和 Shadowsocks 2022
 
-当前管理脚本版本：`1.2.7`
+当前管理脚本版本：`1.2.8`
 
 ## 功能
 
 - 添加、查看、修改、删除和清空节点
 - 支持 VLESS + Reality + Vision
 - 支持 Shadowsocks 2022，固定加密方式为 `2022-blake3-aes-128-gcm`
+- 新增 Shadowsocks 2022 节点时启用配置级 NTP；未指定服务器时使用 `162.159.200.1`
 - 自动生成 UUID、Reality 密钥、Short ID 和 Shadowsocks 2022 密码
 - 输出 VLESS 和 Shadowsocks 2022 节点链接
 - 支持 systemd、OpenRC 和 direct 服务管理
@@ -31,7 +32,7 @@
 sing-box 管理（当前节点：0 个）
 sing-box 状态：未安装
 sing-box 版本：未安装
-管理脚本版本：v1.2.7
+管理脚本版本：v1.2.8
 
 基础功能
 [1]  添加节点
