@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
+# sing-box 节点管理脚本
 # shellcheck disable=SC2015
 set -uo pipefail
 
 umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
-# 运行时路径与版本
-SCRIPT_VERSION="1.2.7"
+# === 运行时路径与版本 ===
+SCRIPT_VERSION="1.2.8"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -38,14 +39,20 @@ CYAN=$'\033[0;36m'
 BLUE=$'\033[1;36m'
 NC=$'\033[0m'
 
-# 输出、信号与终端
+# === 输出、信号与终端 ===
 fail() {
     printf '  %s[错误] %s%s\n' "$RED" "$*" "$NC" >&2
     return 1
 }
-info() { printf '  %s[信息] %s%s\n' "$CYAN" "$*" "$NC"; }
-warn() { printf '  %s[注意] %s%s\n' "$YELLOW" "$*" "$NC"; }
-success() { printf '  %s[成功] %s%s\n' "$GREEN" "$*" "$NC"; }
+info() {
+    printf '  %s[信息] %s%s\n' "$CYAN" "$*" "$NC"
+}
+warn() {
+    printf '  %s[注意] %s%s\n' "$YELLOW" "$*" "$NC"
+}
+success() {
+    printf '  %s[成功] %s%s\n' "$GREEN" "$*" "$NC"
+}
 interrupt_exit() {
     printf '\n'
     exit 130
@@ -53,23 +60,23 @@ interrupt_exit() {
 
 clear_terminal() {
     [[ -t 1 ]] || return 0
-    command -v clear >/dev/null 2>&1 && clear 2>/dev/null || true
+    command -v clear > /dev/null 2>&1 && clear 2> /dev/null || true
     printf '\033[3J\033[2J\033[H\033[0m'
 }
 
-# 日志轮转与临时文件维护
+# === 日志轮转与临时文件维护 ===
 file_size_bytes() {
     local file=$1 size
-    size=$(stat -c '%s' "$file" 2>/dev/null || true)
+    size=$(stat -c '%s' "$file" 2> /dev/null || true)
     if [[ $size =~ ^[0-9]+$ ]]; then
         printf '%s' "$size"
     else
-        wc -c <"$file" 2>/dev/null | tr -d '[:space:]' || printf '0'
+        wc -c < "$file" 2> /dev/null | tr -d '[:space:]' || printf '0'
     fi
 }
 
 rotate_file_log() {
-    # 原地截断活动日志，保持服务正在写入的 inode。
+    # 原地截断活动日志，保持服务正在写入的 inode
     local file=$1 size temp index
     [[ -f $file ]] || return 0
     size=$(file_size_bytes "$file")
@@ -77,12 +84,12 @@ rotate_file_log() {
     ((size > LOG_MAX_BYTES)) || return 0
     rm -f -- "$file.$((LOG_ROTATIONS + 1))"
     for ((index = LOG_ROTATIONS; index > 1; index--)); do
-        [[ -e "$file.$((index - 1))" ]] && mv -f -- "$file.$((index - 1))" "$file.$index" 2>/dev/null || true
+        [[ -e "$file.$((index - 1))" ]] && mv -f -- "$file.$((index - 1))" "$file.$index" 2> /dev/null || true
     done
-    cp -p -- "$file" "$file.1" 2>/dev/null || return 0
+    cp -p -- "$file" "$file.1" 2> /dev/null || return 0
     temp=$(mktemp "${file}.trim.XXXXXX") || return 0
-    if tail -c "$LOG_KEEP_BYTES" "$file" >"$temp" 2>/dev/null && cat "$temp" >"$file"; then
-        chmod 640 "$file" 2>/dev/null || true
+    if tail -c "$LOG_KEEP_BYTES" "$file" > "$temp" 2> /dev/null && cat "$temp" > "$file"; then
+        chmod 640 "$file" 2> /dev/null || true
     fi
     rm -f -- "$temp"
 }
@@ -98,7 +105,7 @@ cleanup_stale_temp_files() {
         find_args+=(-name "$pattern" -o)
     done
     find_args+=(-false \) -exec rm -rf -- {} +)
-    find "${find_args[@]}" 2>/dev/null || true
+    find "${find_args[@]}" 2> /dev/null || true
 }
 
 maintenance_cleanup() {
@@ -107,22 +114,22 @@ maintenance_cleanup() {
         '.transaction.*' '.core.*' '.config.*' '.meta.*' '.script.*'
 }
 
-# 管理脚本锁与交互输入
+# === 管理脚本锁与交互输入 ===
 lock_fd_is_inherited() {
     local fd_target lock_target
     [[ -e "/proc/$$/fd/9" ]] || return 1
-    command -v readlink >/dev/null 2>&1 || return 1
-    fd_target=$(readlink -f "/proc/$$/fd/9" 2>/dev/null || true)
-    lock_target=$(readlink -f "$LOCK_FILE" 2>/dev/null || true)
+    command -v readlink > /dev/null 2>&1 || return 1
+    fd_target=$(readlink -f "/proc/$$/fd/9" 2> /dev/null || true)
+    lock_target=$(readlink -f "$LOCK_FILE" 2> /dev/null || true)
     [[ -n "$fd_target" && -n "$lock_target" && "$fd_target" == "$lock_target" ]]
 }
 
 lock_owner_pid() {
     local owner='' lock_target='' fd pid fd_target
-    [[ -r "$LOCK_PID_FILE" ]] && owner=$(cat "$LOCK_PID_FILE" 2>/dev/null || true)
-    lock_target=$(readlink -f "$LOCK_FILE" 2>/dev/null || true)
-    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
-        fd_target=$(readlink -f "/proc/$owner/fd/9" 2>/dev/null || true)
+    [[ -r "$LOCK_PID_FILE" ]] && owner=$(cat "$LOCK_PID_FILE" 2> /dev/null || true)
+    lock_target=$(readlink -f "$LOCK_FILE" 2> /dev/null || true)
+    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2> /dev/null; then
+        fd_target=$(readlink -f "/proc/$owner/fd/9" 2> /dev/null || true)
         if [[ -z "$lock_target" || "$fd_target" == "$lock_target" ]]; then
             printf '%s' "$owner"
             return 0
@@ -137,7 +144,7 @@ lock_owner_pid() {
         pid=${fd#/proc/}
         pid=${pid%%/*}
         [[ "$pid" == "$$" ]] && continue
-        fd_target=$(readlink -f "$fd" 2>/dev/null || true)
+        fd_target=$(readlink -f "$fd" 2> /dev/null || true)
         if [[ -n "$fd_target" && "$fd_target" == "$lock_target" ]]; then
             printf '%s' "$pid"
             return 0
@@ -150,33 +157,33 @@ cleanup_lock() {
     local owner
     owner=$(lock_owner_pid)
     [[ "$owner" == "$$" ]] && rm -f -- "$LOCK_PID_FILE"
-    exec 9>&- 2>/dev/null || true
+    exec 9>&- 2> /dev/null || true
 }
 
 acquire_manager_lock() {
-    # exec 重新加载脚本时复用 fd 9；服务子进程必须关闭该描述符。
+    # exec 重新加载脚本时复用 fd 9；服务子进程必须关闭该描述符
     local owner
     mkdir -p "$(dirname "$LOCK_FILE")" || {
         fail '无法创建管理锁目录'
         return 1
     }
     if lock_fd_is_inherited; then
-        printf '%s\n' "$$" >"$LOCK_PID_FILE" || {
+        printf '%s\n' "$$" > "$LOCK_PID_FILE" || {
             fail '无法写入管理锁 PID'
             return 1
         }
         trap cleanup_lock EXIT
         return 0
     fi
-    exec 9>"$LOCK_FILE" || {
+    exec 9> "$LOCK_FILE" || {
         fail '无法打开管理锁'
         return 1
     }
     if ! flock -n 9; then
         owner=$(lock_owner_pid)
-        if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2> /dev/null; then
             exec 9>&-
-            exec 9>"$LOCK_FILE" || {
+            exec 9> "$LOCK_FILE" || {
                 fail '无法重新打开管理锁'
                 return 1
             }
@@ -194,7 +201,7 @@ acquire_manager_lock() {
             return 1
         fi
     fi
-    printf '%s\n' "$$" >"$LOCK_PID_FILE" || {
+    printf '%s\n' "$$" > "$LOCK_PID_FILE" || {
         exec 9>&-
         fail '无法写入管理锁 PID'
         return 1
@@ -225,15 +232,15 @@ pause_enter() {
     return 0
 }
 
-# 依赖、初始化系统与服务控制
+# === 依赖、初始化系统与服务控制 ===
 install_packages() {
-    if command -v apt-get >/dev/null 2>&1; then
+    if command -v apt-get > /dev/null 2>&1; then
         apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y bash ca-certificates curl jq tar coreutils util-linux iproute2 procps
-    elif command -v apk >/dev/null 2>&1; then
+    elif command -v apk > /dev/null 2>&1; then
         apk add --no-cache bash ca-certificates curl jq tar coreutils util-linux iproute2 procps
-    elif command -v dnf >/dev/null 2>&1; then
+    elif command -v dnf > /dev/null 2>&1; then
         dnf install -y bash ca-certificates curl jq tar coreutils util-linux iproute procps-ng
-    elif command -v yum >/dev/null 2>&1; then
+    elif command -v yum > /dev/null 2>&1; then
         yum install -y bash ca-certificates curl jq tar coreutils util-linux iproute procps-ng
     else
         fail '无法识别包管理器，需要 apt-get、apk、dnf 或 yum'
@@ -244,18 +251,22 @@ install_packages() {
 ensure_dependencies() {
     local required=(curl jq tar sha256sum flock ss timeout base64)
     local missing=0 cmd
-    for cmd in "${required[@]}"; do command -v "$cmd" >/dev/null 2>&1 || missing=1; done
+    for cmd in "${required[@]}"; do
+        command -v "$cmd" > /dev/null 2>&1 || missing=1
+    done
     ((missing == 0)) || install_packages || return 1
-    for cmd in "${required[@]}"; do command -v "$cmd" >/dev/null 2>&1 || {
-        fail "缺少依赖: $cmd"
-        return 1
-    }; done
+    for cmd in "${required[@]}"; do
+        command -v "$cmd" > /dev/null 2>&1 || {
+            fail "缺少依赖: $cmd"
+            return 1
+        }
+    done
 }
 
 detect_init() {
-    if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+    if [[ -d /run/systemd/system ]] && command -v systemctl > /dev/null 2>&1; then
         INIT_SYSTEM=systemd
-    elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1 && command -v openrc-run >/dev/null 2>&1; then
+    elif command -v rc-service > /dev/null 2>&1 && command -v rc-update > /dev/null 2>&1 && command -v openrc-run > /dev/null 2>&1; then
         INIT_SYSTEM=openrc
     else
         INIT_SYSTEM=direct
@@ -265,35 +276,37 @@ detect_init() {
 svc_active() {
     case "$INIT_SYSTEM" in
         systemd) systemctl is-active --quiet sing-box 9>&- ;;
-        openrc) rc-service sing-box status >/dev/null 2>&1 9>&- ;;
+        openrc) rc-service sing-box status > /dev/null 2>&1 9>&- ;;
         direct)
-            direct_service_pid >/dev/null
+            direct_service_pid > /dev/null
             ;;
     esac
 }
 
 svc_enabled() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl is-enabled --quiet sing-box >/dev/null 2>&1 9>&- ;;
-        openrc) rc-update show default 2>/dev/null 9>&- | grep -Eq '(^|[[:space:]])sing-box([[:space:]]|$)' 9>&- ;;
+        systemd) systemctl is-enabled --quiet sing-box > /dev/null 2>&1 9>&- ;;
+        openrc) rc-update show default 2> /dev/null 9>&- | grep -Eq '(^|[[:space:]])sing-box([[:space:]]|$)' 9>&- ;;
         direct) return 1 ;;
     esac
 }
 
-svc_reload() { [[ "$INIT_SYSTEM" == systemd ]] && systemctl daemon-reload >/dev/null 2>&1 9>&- || true; }
+svc_reload() {
+    [[ "$INIT_SYSTEM" == systemd ]] && systemctl daemon-reload > /dev/null 2>&1 9>&- || true
+}
 
 svc_enable() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl enable sing-box >/dev/null 2>&1 9>&- ;;
-        openrc) rc-update add sing-box default >/dev/null 2>&1 9>&- ;;
+        systemd) systemctl enable sing-box > /dev/null 2>&1 9>&- ;;
+        openrc) rc-update add sing-box default > /dev/null 2>&1 9>&- ;;
         direct) return 0 ;;
     esac
 }
 
 svc_disable() {
     case "$INIT_SYSTEM" in
-        systemd) systemctl disable sing-box >/dev/null 2>&1 9>&- ;;
-        openrc) rc-update del sing-box default >/dev/null 2>&1 9>&- ;;
+        systemd) systemctl disable sing-box > /dev/null 2>&1 9>&- ;;
+        openrc) rc-update del sing-box default > /dev/null 2>&1 9>&- ;;
         direct) return 0 ;;
     esac
 }
@@ -301,17 +314,17 @@ svc_disable() {
 svc_start() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
-        systemd) systemctl start sing-box >/dev/null 2>&1 9>&- && svc_active ;;
+        systemd) systemctl start sing-box > /dev/null 2>&1 9>&- && svc_active ;;
         openrc)
-            rc-service sing-box start >/dev/null 2>&1 9>&- || return 1
+            rc-service sing-box start > /dev/null 2>&1 9>&- || return 1
             svc_active
             ;;
         direct)
             mkdir -p "$(dirname "$PID_FILE")" || return 1
-            mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+            mkdir -p "$(dirname "$LOG_FILE")" 2> /dev/null || true
             rm -f "$PID_FILE"
-            nohup "$SINGBOX_BIN" run -c "$CONFIG_FILE" >>"$LOG_FILE" 2>&1 </dev/null 9>&- &
-            printf '%s\n' "$!" >"$PID_FILE"
+            nohup "$SINGBOX_BIN" run -c "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 < /dev/null 9>&- &
+            printf '%s\n' "$!" > "$PID_FILE"
             sleep 1
             svc_active
             ;;
@@ -322,7 +335,7 @@ svc_stop() {
     case "$INIT_SYSTEM" in
         systemd)
             svc_active || return 0
-            systemctl stop sing-box >/dev/null 2>&1 9>&- || return 1
+            systemctl stop sing-box > /dev/null 2>&1 9>&- || return 1
             for _ in {1..40}; do
                 svc_active || return 0
                 sleep 0.25
@@ -331,7 +344,7 @@ svc_stop() {
             ;;
         openrc)
             svc_active || return 0
-            rc-service sing-box stop >/dev/null 2>&1 9>&- || return 1
+            rc-service sing-box stop > /dev/null 2>&1 9>&- || return 1
             for _ in {1..40}; do
                 svc_active || return 0
                 sleep 0.25
@@ -340,20 +353,20 @@ svc_stop() {
             ;;
         direct)
             local pid='' recorded=''
-            [[ -s "$PID_FILE" ]] && recorded=$(cat "$PID_FILE" 2>/dev/null || true)
-            if [[ "$recorded" =~ ^[0-9]+$ ]] && ! kill -0 "$recorded" 2>/dev/null; then
+            [[ -s "$PID_FILE" ]] && recorded=$(cat "$PID_FILE" 2> /dev/null || true)
+            if [[ "$recorded" =~ ^[0-9]+$ ]] && ! kill -0 "$recorded" 2> /dev/null; then
                 rm -f "$PID_FILE"
                 return 0
             fi
-            pid=$(direct_service_pid 2>/dev/null || true)
+            pid=$(direct_service_pid 2> /dev/null || true)
             [[ -n "$pid" ]] || {
                 [[ -s "$PID_FILE" ]] || return 0
                 fail 'PID 文件对应的进程不是 sing-box，未停止'
                 return 1
             }
-            kill "$pid" 2>/dev/null || return 1
+            kill "$pid" 2> /dev/null || return 1
             for _ in {1..40}; do
-                kill -0 "$pid" 2>/dev/null || {
+                kill -0 "$pid" 2> /dev/null || {
                     rm -f "$PID_FILE"
                     return 0
                 }
@@ -367,9 +380,9 @@ svc_stop() {
 svc_restart() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
     case "$INIT_SYSTEM" in
-        systemd) systemctl restart sing-box >/dev/null 2>&1 9>&- && svc_active ;;
+        systemd) systemctl restart sing-box > /dev/null 2>&1 9>&- && svc_active ;;
         openrc)
-            rc-service sing-box restart >/dev/null 2>&1 9>&- || return 1
+            rc-service sing-box restart > /dev/null 2>&1 9>&- || return 1
             svc_active
             ;;
         direct)
@@ -383,46 +396,54 @@ svc_restart() {
 direct_service_pid() {
     local pid cmdline
     [[ -s "$PID_FILE" ]] || return 1
-    pid=$(cat "$PID_FILE" 2>/dev/null || true)
+    pid=$(cat "$PID_FILE" 2> /dev/null || true)
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-    kill -0 "$pid" 2>/dev/null || return 1
+    kill -0 "$pid" 2> /dev/null || return 1
     [[ -r "/proc/$pid/cmdline" ]] || return 1
-    cmdline=$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null || true)
-    grep -Fxq "$SINGBOX_BIN" <<<"$cmdline" || return 1
-    grep -Fxq run <<<"$cmdline" || return 1
-    grep -Fxq "$CONFIG_FILE" <<<"$cmdline" || return 1
+    cmdline=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2> /dev/null || true)
+    grep -Fxq "$SINGBOX_BIN" <<< "$cmdline" || return 1
+    grep -Fxq run <<< "$cmdline" || return 1
+    grep -Fxq "$CONFIG_FILE" <<< "$cmdline" || return 1
     printf '%s\n' "$pid"
 }
 
 write_service_unit() {
     if [[ "$INIT_SYSTEM" == systemd ]]; then
         mkdir -p "${SYSTEMD_UNIT%/*}" || return 1
-        printf '%s\n' '[Unit]' 'Description=sing-box service' 'After=network-online.target' 'Wants=network-online.target' '[Service]' "ExecStart=$SINGBOX_BIN run -c $CONFIG_FILE" 'Restart=on-failure' 'RestartSec=3' 'LimitNOFILE=1048576' '[Install]' 'WantedBy=multi-user.target' >"$SYSTEMD_UNIT" || return 1
+        printf '%s\n' '[Unit]' 'Description=sing-box service' 'After=network-online.target' 'Wants=network-online.target' '[Service]' "ExecStart=$SINGBOX_BIN run -c $CONFIG_FILE" 'Restart=on-failure' 'RestartSec=3' 'LimitNOFILE=1048576' '[Install]' 'WantedBy=multi-user.target' > "$SYSTEMD_UNIT" || return 1
         chmod 644 "$SYSTEMD_UNIT" || return 1
         svc_reload
     elif [[ "$INIT_SYSTEM" == openrc ]]; then
-        printf '%s\n' '#!/sbin/openrc-run' 'description="sing-box service"' "command=\"$SINGBOX_BIN\"" "command_args=\"run -c $CONFIG_FILE\"" 'supervisor="supervise-daemon"' 'respawn_delay=3' "output_log=\"$LOG_FILE\"" "error_log=\"$LOG_FILE\"" 'depend() { use net; }' >"$OPENRC_UNIT" || return 1
+        printf '%s\n' '#!/sbin/openrc-run' 'description="sing-box service"' "command=\"$SINGBOX_BIN\"" "command_args=\"run -c $CONFIG_FILE\"" 'supervisor="supervise-daemon"' 'respawn_delay=3' "output_log=\"$LOG_FILE\"" "error_log=\"$LOG_FILE\"" 'depend() { use net; }' > "$OPENRC_UNIT" || return 1
         chmod 755 "$OPENRC_UNIT" || return 1
     fi
 }
 
-# 输入校验、地址处理与核心探测
+# === 输入校验、地址处理与核心探测 ===
 get_url() {
     local url="$1" output="$2"
-    if command -v curl >/dev/null 2>&1; then
+    if command -v curl > /dev/null 2>&1; then
         curl -fLsS --retry 2 --connect-timeout 15 --max-time 180 --proto '=https' --proto-redir '=https' "$url" -o "$output"
-    elif command -v wget >/dev/null 2>&1; then
+    elif command -v wget > /dev/null 2>&1; then
         wget -qO "$output" "$url"
     else
         return 1
     fi
 }
 
-valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
-valid_text() { [[ -n "$1" && "$1" != *[[:space:]/\\]* && "$1" != *[[:cntrl:]]* ]]; }
-valid_name() { [[ -n "$1" && ${#1} -le 80 && "$1" != *[[:cntrl:]]* ]]; }
+valid_port() {
+    [[ "$1" =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535))
+}
+valid_text() {
+    [[ -n "$1" && "$1" != *[[:space:]/\\]* && "$1" != *[[:cntrl:]]* ]]
+}
+valid_name() {
+    [[ -n "$1" && ${#1} -le 80 && "$1" != *[[:cntrl:]]* ]]
+}
 
-uri_escape() { printf '%s' "$1" | jq -sRr @uri; }
+uri_escape() {
+    printf '%s' "$1" | jq -sRr @uri
+}
 
 format_server_for_uri() {
     local server="$1"
@@ -431,16 +452,18 @@ format_server_for_uri() {
 
 server_ip_guess() {
     local ip=''
-    ip=$(curl -4fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)
-    [[ -n "$ip" ]] || ip=$(curl -4fsS --max-time 4 https://icanhazip.com 2>/dev/null || true)
-    [[ -n "$ip" ]] || ip=$(curl -6fsS --max-time 4 https://api64.ipify.org 2>/dev/null || true)
+    ip=$(curl -4fsS --max-time 4 https://api.ipify.org 2> /dev/null || true)
+    [[ -n "$ip" ]] || ip=$(curl -4fsS --max-time 4 https://icanhazip.com 2> /dev/null || true)
+    [[ -n "$ip" ]] || ip=$(curl -6fsS --max-time 4 https://api64.ipify.org 2> /dev/null || true)
     printf '%s' "${ip//$'\n'/}"
 }
 
 resolve_core() {
     local candidate discovered=''
-    if [[ -n "$SINGBOX_BIN" && -x "$SINGBOX_BIN" ]]; then return 0; fi
-    if discovered=$(command -v sing-box 2>/dev/null); then
+    if [[ -n "$SINGBOX_BIN" && -x "$SINGBOX_BIN" ]]; then
+        return 0
+    fi
+    if discovered=$(command -v sing-box 2> /dev/null); then
         [[ -x "$discovered" ]] && {
             SINGBOX_BIN="$discovered"
             return 0
@@ -457,37 +480,39 @@ resolve_core() {
 }
 
 core_version() {
-    resolve_core >/dev/null 2>&1 || true
+    resolve_core > /dev/null 2>&1 || true
     [[ -x "$SINGBOX_BIN" ]] || {
         printf '未安装'
         return
     }
     local output v
-    output=$("$SINGBOX_BIN" version 2>/dev/null || true)
-    v=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<<"$output")
+    output=$("$SINGBOX_BIN" version 2> /dev/null || true)
+    v=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
     [[ -n "$v" ]] && printf 'v%s' "$v" || printf '未知'
 }
 
 init_state() {
     mkdir -p "$SINGBOX_DIR" || return 1
-    chmod 700 "$SINGBOX_DIR" 2>/dev/null || true
-    [[ -s "$CONFIG_FILE" ]] || printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' >"$CONFIG_FILE"
-    [[ -s "$META_FILE" ]] || printf '%s\n' '{"nodes":[]}' >"$META_FILE"
-    jq -e 'type == "object" and (.inbounds|type == "array") and (.outbounds|type == "array")' "$CONFIG_FILE" >/dev/null 2>&1 || {
+    chmod 700 "$SINGBOX_DIR" 2> /dev/null || true
+    [[ -s "$CONFIG_FILE" ]] || printf '%s\n' '{"log":{"level":"info","timestamp":true},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > "$CONFIG_FILE"
+    [[ -s "$META_FILE" ]] || printf '%s\n' '{"nodes":[]}' > "$META_FILE"
+    jq -e 'type == "object" and (.inbounds|type == "array") and (.outbounds|type == "array")' "$CONFIG_FILE" > /dev/null 2>&1 || {
         fail "配置文件格式无效: $CONFIG_FILE"
         return 1
     }
-    jq -e 'type == "object" and (.nodes|type == "array")' "$META_FILE" >/dev/null 2>&1 || {
+    jq -e 'type == "object" and (.nodes|type == "array")' "$META_FILE" > /dev/null 2>&1 || {
         fail "节点元数据格式无效: $META_FILE"
         return 1
     }
-    chmod 600 "$CONFIG_FILE" "$META_FILE" 2>/dev/null || true
+    chmod 600 "$CONFIG_FILE" "$META_FILE" 2> /dev/null || true
 }
 
-# 节点数据、配置校验与事务提交
-node_count() { jq -r '.nodes | length' "$META_FILE"; }
+# === 节点数据、配置校验与事务提交 ===
+node_count() {
+    jq -r '.nodes | length' "$META_FILE"
+}
 
-# 以 NUL 分隔读取节点字段，避免同一节点反复启动 jq；节点输入校验已拒绝控制字符。
+# 以 NUL 分隔读取节点字段，避免同一节点反复启动 jq；节点输入校验已拒绝控制字符
 node_fields() {
     jq -j --argjson i "$1" '
         .nodes[$i]
@@ -498,24 +523,24 @@ node_fields() {
 
 port_conflict() {
     local port="$1" exclude="${2:-}" mode="${3:-tcp}"
-    jq -e --argjson p "$port" --arg e "$exclude" '.nodes[]? | select((.port|tonumber) == $p and ($e == "" or (.tag // "") != $e))' "$META_FILE" >/dev/null 2>&1 && return 0
-    jq -e --argjson p "$port" --arg e "$exclude" '.inbounds[]? | select((.listen_port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))' "$CONFIG_FILE" >/dev/null 2>&1 && return 0
-    if command -v ss >/dev/null 2>&1; then
-        ss -H -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
+    jq -e --argjson p "$port" --arg e "$exclude" '.nodes[]? | select((.port|tonumber) == $p and ($e == "" or (.tag // "") != $e))' "$META_FILE" > /dev/null 2>&1 && return 0
+    jq -e --argjson p "$port" --arg e "$exclude" '.inbounds[]? | select((.listen_port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))' "$CONFIG_FILE" > /dev/null 2>&1 && return 0
+    if command -v ss > /dev/null 2>&1; then
+        ss -H -ltn 2> /dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
         if [[ "$mode" == tcp_udp ]]; then
-            ss -H -lun 2>/dev/null | awk -v p=":$port" '$5 ~ p"$" || $4 ~ p"$" {found=1} END {exit !found}' && return 0
+            ss -H -lun 2> /dev/null | awk -v p=":$port" '$5 ~ p"$" || $4 ~ p"$" {found=1} END {exit !found}' && return 0
         fi
     fi
     return 1
 }
 
 generate_credentials() {
-    NEW_UUID=$("$SINGBOX_BIN" generate uuid 2>/dev/null) || return 1
+    NEW_UUID=$("$SINGBOX_BIN" generate uuid 2> /dev/null) || return 1
     local pair
-    pair=$("$SINGBOX_BIN" generate reality-keypair 2>/dev/null) || return 1
-    NEW_PRIVATE=$(awk '/PrivateKey/ {print $NF}' <<<"$pair")
-    NEW_PUBLIC=$(awk '/PublicKey/ {print $NF}' <<<"$pair")
-    NEW_SHORT_ID=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null) || return 1
+    pair=$("$SINGBOX_BIN" generate reality-keypair 2> /dev/null) || return 1
+    NEW_PRIVATE=$(awk '/PrivateKey/ {print $NF}' <<< "$pair")
+    NEW_PUBLIC=$(awk '/PublicKey/ {print $NF}' <<< "$pair")
+    NEW_SHORT_ID=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null) || return 1
     [[ -n "$NEW_UUID" && -n "$NEW_PRIVATE" && -n "$NEW_PUBLIC" && "$NEW_SHORT_ID" =~ ^[0-9a-fA-F]{1,16}$ ]]
 }
 
@@ -561,7 +586,7 @@ build_node_link() {
 
 check_config() {
     local mode="${1:-verbose}"
-    resolve_core >/dev/null 2>&1 || true
+    resolve_core > /dev/null 2>&1 || true
     [[ -x "$SINGBOX_BIN" ]] || {
         warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'
         return 1
@@ -575,28 +600,28 @@ check_config() {
     fail 'config.json 配置检查失败'
     while IFS= read -r line; do
         printf '    %s\n' "$line"
-    done <<<"$result"
+    done <<< "$result"
     return 1
 }
 
 apply_transaction() {
-    # 同时备份配置、元数据和服务单元，以便失败后恢复一致状态。
+    # 同时备份配置、元数据和服务单元，以便失败后恢复一致状态
     local new_config="$1" new_meta="$2" count="$3" backup active=0 enabled=0 rollback_ok=1 unit_path unit_exists=0
     backup=$(mktemp -d "$SINGBOX_DIR/.recovery.XXXXXX") || {
         fail '无法创建事务备份'
         return 1
     }
-    cp -p "$CONFIG_FILE" "$backup/config" 2>/dev/null || {
+    cp -p "$CONFIG_FILE" "$backup/config" 2> /dev/null || {
         fail "配置备份失败，备份保留在 $backup"
         return 1
     }
-    cp -p "$META_FILE" "$backup/meta" 2>/dev/null || {
+    cp -p "$META_FILE" "$backup/meta" 2> /dev/null || {
         fail "节点元数据备份失败，备份保留在 $backup"
         return 1
     }
     [[ "$INIT_SYSTEM" == systemd ]] && unit_path="$SYSTEMD_UNIT" || unit_path="$OPENRC_UNIT"
     if [[ -f "$unit_path" ]]; then
-        cp -p "$unit_path" "$backup/unit" 2>/dev/null || {
+        cp -p "$unit_path" "$backup/unit" 2> /dev/null || {
             fail "服务单元备份失败，备份保留在 $backup"
             return 1
         }
@@ -605,12 +630,24 @@ apply_transaction() {
     svc_active && active=1
     svc_enabled && enabled=1
     rollback_transaction() {
-        cp -p "$backup/config" "$CONFIG_FILE" 2>/dev/null || rollback_ok=0
-        cp -p "$backup/meta" "$META_FILE" 2>/dev/null || rollback_ok=0
-        if ((unit_exists)); then cp -p "$backup/unit" "$unit_path" 2>/dev/null || rollback_ok=0; else rm -f "$unit_path" 2>/dev/null || rollback_ok=0; fi
+        cp -p "$backup/config" "$CONFIG_FILE" 2> /dev/null || rollback_ok=0
+        cp -p "$backup/meta" "$META_FILE" 2> /dev/null || rollback_ok=0
+        if ((unit_exists)); then
+            cp -p "$backup/unit" "$unit_path" 2> /dev/null || rollback_ok=0
+        else
+            rm -f "$unit_path" 2> /dev/null || rollback_ok=0
+        fi
         svc_reload
-        if ((active)); then svc_active || svc_start >/dev/null 2>&1 || rollback_ok=0; else svc_active && svc_stop >/dev/null 2>&1 || { svc_active && rollback_ok=0; }; fi
-        if ((enabled)); then svc_enabled || svc_enable >/dev/null 2>&1 || rollback_ok=0; else svc_enabled && svc_disable >/dev/null 2>&1 || { svc_enabled && rollback_ok=0; }; fi
+        if ((active)); then
+            svc_active || svc_start > /dev/null 2>&1 || rollback_ok=0
+        else
+            svc_active && svc_stop > /dev/null 2>&1 || { svc_active && rollback_ok=0; }
+        fi
+        if ((enabled)); then
+            svc_enabled || svc_enable > /dev/null 2>&1 || rollback_ok=0
+        else
+            svc_enabled && svc_disable > /dev/null 2>&1 || { svc_enabled && rollback_ok=0; }
+        fi
         if ((rollback_ok)); then
             rm -rf "$backup"
             fail '事务失败，已恢复原配置'
@@ -662,10 +699,10 @@ apply_transaction() {
     return 0
 }
 
-# 核心更新与节点管理
+# === 核心更新与节点管理 ===
 install_core() (
     local requested="${1:-latest}" temp version arch libc asset_name asset_url digest binary member current installed='' output
-    resolve_core >/dev/null 2>&1 || true
+    resolve_core > /dev/null 2>&1 || true
     info '正在检查 sing-box 核心更新'
     temp=$(mktemp -d "$SINGBOX_DIR/.core.XXXXXX") || exit 1
     trap 'rm -rf "$temp"' EXIT INT TERM
@@ -682,8 +719,8 @@ install_core() (
         exit 1
     }
     if [[ -x "$SINGBOX_BIN" ]]; then
-        output=$("$SINGBOX_BIN" version 2>/dev/null || true)
-        installed=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<<"$output")
+        output=$("$SINGBOX_BIN" version 2> /dev/null || true)
+        installed=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
         if [[ "$requested" == latest && "$installed" == "$version" ]]; then
             info "sing-box 核心已是最新版本 v$version"
             exit 0
@@ -734,7 +771,7 @@ install_core() (
             exit 1
         }
     fi
-    tar -tzf "$temp/package.tar.gz" >"$temp/files" || {
+    tar -tzf "$temp/package.tar.gz" > "$temp/files" || {
         fail '核心压缩包无效'
         exit 1
     }
@@ -744,15 +781,17 @@ install_core() (
         exit 1
     }
     binary="$temp/sing-box"
-    tar -xOzf "$temp/package.tar.gz" -- "$member" >"$binary" || exit 1
+    tar -xOzf "$temp/package.tar.gz" -- "$member" > "$binary" || exit 1
     chmod 755 "$binary"
-    output=$("$binary" version 2>/dev/null || true)
-    current=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<<"$output")
+    output=$("$binary" version 2> /dev/null || true)
+    current=$(awk '/^sing-box version[[:space:]]/{print $3; exit}' <<< "$output")
     [[ "$current" == "$version" ]] || {
         fail "核心版本不匹配: $current"
         exit 1
     }
-    if [[ -x "$SINGBOX_BIN" ]]; then cp -p "$SINGBOX_BIN" "$temp/old" || exit 1; fi
+    if [[ -x "$SINGBOX_BIN" ]]; then
+        cp -p "$SINGBOX_BIN" "$temp/old" || exit 1
+    fi
     mkdir -p "${SINGBOX_BIN%/*}" || exit 1
     mv -f "$binary" "$SINGBOX_BIN" || exit 1
     chmod 755 "$SINGBOX_BIN"
@@ -772,7 +811,7 @@ update_core() {
 }
 
 require_core() {
-    resolve_core >/dev/null 2>&1 || true
+    resolve_core > /dev/null 2>&1 || true
     [[ -x "$SINGBOX_BIN" ]] || {
         warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'
         return 1
@@ -826,7 +865,7 @@ add_vless_node() {
     private="$NEW_PRIVATE"
     public="$NEW_PUBLIC"
     sid="$NEW_SHORT_ID"
-    id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null || printf '%s' "$(date +%s%N)")
+    id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null || printf '%s' "$(date +%s%N)")
     tag="vless-in-$id"
     local new_config new_meta
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
@@ -835,12 +874,12 @@ add_vless_node() {
         return 1
     }
     jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
-        '.inbounds += [{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$private,short_id:[$sid]}}}]' "$CONFIG_FILE" >"$new_config" || {
+        '.inbounds += [{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$private,short_id:[$sid]}}}]' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
     jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
-        '.nodes += [{protocol:"vless-reality",id:$id,tag:$tag,name:$name,server:$server,port:$port,sni:$sni,uuid:$uuid,public_key:$public,short_id:$sid}]' "$META_FILE" >"$new_meta" || {
+        '.nodes += [{protocol:"vless-reality",id:$id,tag:$tag,name:$name,server:$server,port:$port,sni:$sni,uuid:$uuid,public_key:$public,short_id:$sid}]' "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
@@ -887,7 +926,7 @@ add_ss2022_node() {
         fail '节点名称不能为空、不能超过 80 字或包含控制字符'
         return 1
     }
-    password=$("$SINGBOX_BIN" generate rand --base64 16 2>/dev/null) || {
+    password=$("$SINGBOX_BIN" generate rand --base64 16 2> /dev/null) || {
         fail '生成 Shadowsocks 2022 密码失败'
         return 1
     }
@@ -895,7 +934,7 @@ add_ss2022_node() {
         fail '生成 Shadowsocks 2022 密码失败'
         return 1
     }
-    id=$("$SINGBOX_BIN" generate rand --hex 8 2>/dev/null || printf '%s' "$(date +%s%N)")
+    id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null || printf '%s' "$(date +%s%N)")
     tag="ss-in-$id"
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
     new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
@@ -903,12 +942,12 @@ add_ss2022_node() {
         return 1
     }
     jq --arg tag "$tag" --arg password "$password" --argjson port "$port" \
-        '.inbounds += [{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$CONFIG_FILE" >"$new_config" || {
+        '.inbounds += [{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
     jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" \
-        '.nodes += [{protocol:"ss2022",id:$id,tag:$tag,name:$name,server:$server,port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$META_FILE" >"$new_meta" || {
+        '.nodes += [{protocol:"ss2022",id:$id,tag:$tag,name:$name,server:$server,port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
@@ -997,12 +1036,12 @@ apply_vless_node_update() {
         rm -f "$new_config"
         return 1
     }
-    config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE" 2>/dev/null) || {
+    config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE" 2> /dev/null) || {
         rm -f "$new_config" "$new_meta"
         fail '目标节点配置读取失败'
         return 1
     }
-    meta_matches=$(jq -r --arg tag "$tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE" 2>/dev/null) || {
+    meta_matches=$(jq -r --arg tag "$tag" '[.nodes[]? | select(.tag==$tag)] | length' "$META_FILE" 2> /dev/null) || {
         rm -f "$new_config" "$new_meta"
         fail '目标节点元数据读取失败'
         return 1
@@ -1013,23 +1052,23 @@ apply_vless_node_update() {
         return 1
     fi
     jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
-        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.handshake |= del(.domain_resolver) | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" >"$new_config" || {
+        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.handshake |= del(.domain_resolver) | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
     jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
-        '(.nodes[] | select(.tag==$tag)) |= (.protocol=(.protocol // "vless-reality") | .name=$name | .server=$server | .port=$port | .sni=$sni | .uuid=$uuid | .public_key=$public | .short_id=$sid)' "$META_FILE" >"$new_meta" || {
+        '(.nodes[] | select(.tag==$tag)) |= (.protocol=(.protocol // "vless-reality") | .name=$name | .server=$server | .port=$port | .sni=$sni | .uuid=$uuid | .public_key=$public | .short_id=$sid)' "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
     if ! jq -e --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
-        'any(.inbounds[]?; .tag==$tag and (.listen_port|tonumber?)==$port and .users[0].uuid==$uuid and .tls.server_name==$sni and .tls.reality.handshake.server==$sni and .tls.reality.private_key==$private and ((.tls.reality.short_id // []) | index($sid)) != null)' "$new_config" >/dev/null 2>&1; then
+        'any(.inbounds[]?; .tag==$tag and (.listen_port|tonumber?)==$port and .users[0].uuid==$uuid and .tls.server_name==$sni and .tls.reality.handshake.server==$sni and .tls.reality.private_key==$private and ((.tls.reality.short_id // []) | index($sid)) != null)' "$new_config" > /dev/null 2>&1; then
         rm -f "$new_config" "$new_meta"
         fail '节点配置修改结果校验失败'
         return 1
     fi
     if ! jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg sni "$sni" --arg uuid "$uuid" --arg public "$public" --arg sid "$sid" --argjson port "$port" \
-        'any(.nodes[]?; .tag==$tag and .name==$name and .server==$server and (.port|tonumber?)==$port and .sni==$sni and .uuid==$uuid and .public_key==$public and .short_id==$sid)' "$new_meta" >/dev/null 2>&1; then
+        'any(.nodes[]?; .tag==$tag and .name==$name and .server==$server and (.port|tonumber?)==$port and .sni==$sni and .uuid==$uuid and .public_key==$public and .short_id==$sid)' "$new_meta" > /dev/null 2>&1; then
         rm -f "$new_config" "$new_meta"
         fail '节点元数据修改结果校验失败'
         return 1
@@ -1158,7 +1197,7 @@ modify_vless_node() {
             4)
                 read_input value '  请输入新 UUID (回车随机生成): ' || return 1
                 if [[ -z "$value" ]]; then
-                    value=$($SINGBOX_BIN generate uuid 2>/dev/null)
+                    value=$($SINGBOX_BIN generate uuid 2> /dev/null)
                     [[ -n "$value" ]] || {
                         fail 'UUID 自动生成失败'
                         continue
@@ -1246,20 +1285,20 @@ apply_ss2022_node_update() {
         fail '目标节点信息不一致，未应用修改，请重新进入菜单'
         return 1
     }
-    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$CONFIG_FILE" >"$new_config" || {
+    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
-    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '(.nodes[] | select(.tag==$tag)) |= (.protocol="ss2022" | .name=$name | .server=$server | .port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$META_FILE" >"$new_meta" || {
+    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '(.nodes[] | select(.tag==$tag)) |= (.protocol="ss2022" | .name=$name | .server=$server | .port=$port | .method="2022-blake3-aes-128-gcm" | .password=$password)' "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
-    jq -e --arg tag "$tag" --arg password "$password" --argjson port "$port" 'any(.inbounds[]?; .tag==$tag and .type=="shadowsocks" and (.listen_port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_config" >/dev/null 2>&1 || {
+    jq -e --arg tag "$tag" --arg password "$password" --argjson port "$port" 'any(.inbounds[]?; .tag==$tag and .type=="shadowsocks" and (.listen_port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_config" > /dev/null 2>&1 || {
         rm -f "$new_config" "$new_meta"
         fail 'Shadowsocks 配置修改结果校验失败'
         return 1
     }
-    jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" 'any(.nodes[]?; .tag==$tag and (.protocol // "vless-reality")=="ss2022" and .name==$name and .server==$server and (.port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_meta" >/dev/null 2>&1 || {
+    jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" 'any(.nodes[]?; .tag==$tag and (.protocol // "vless-reality")=="ss2022" and .name==$name and .server==$server and (.port|tonumber?)==$port and .method=="2022-blake3-aes-128-gcm" and .password==$password)' "$new_meta" > /dev/null 2>&1 || {
         rm -f "$new_config" "$new_meta"
         fail 'Shadowsocks 元数据修改结果校验失败'
         return 1
@@ -1356,7 +1395,7 @@ modify_ss2022_node() {
                 pause_enter '  按回车返回修改节点菜单...'
                 ;;
             4)
-                value=$("$SINGBOX_BIN" generate rand --base64 16 2>/dev/null) || {
+                value=$("$SINGBOX_BIN" generate rand --base64 16 2> /dev/null) || {
                     fail '生成 Shadowsocks 2022 密码失败'
                     continue
                 }
@@ -1404,11 +1443,11 @@ delete_node() {
         rm -f "$new_config"
         return 1
     }
-    jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" >"$new_config" || {
+    jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
-    jq --arg tag "$tag" 'del(.nodes[] | select(.tag==$tag))' "$META_FILE" >"$new_meta" || {
+    jq --arg tag "$tag" 'del(.nodes[] | select(.tag==$tag))' "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
@@ -1436,11 +1475,11 @@ clear_nodes() {
         rm -f "$new_config"
         return 1
     }
-    jq '.inbounds=[]' "$CONFIG_FILE" >"$new_config" || {
+    jq '.inbounds=[]' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
-    jq '.nodes=[]' "$META_FILE" >"$new_meta" || {
+    jq '.nodes=[]' "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
@@ -1451,7 +1490,7 @@ clear_nodes() {
         return 1
     fi
 }
-# 服务菜单动作、脚本更新与卸载
+# === 服务菜单动作、脚本更新与卸载 ===
 start_service() {
     (($(node_count) > 0)) || {
         warn '暂无节点，无法启动 sing-box'
@@ -1479,7 +1518,7 @@ stop_service() {
         fail 'sing-box 停止失败'
         return 1
     }
-    svc_disable >/dev/null 2>&1 || true
+    svc_disable > /dev/null 2>&1 || true
     success 'sing-box 已停止，开机自启已关闭'
 }
 restart_service() {
@@ -1509,7 +1548,7 @@ update_script() (
         fail '管理脚本下载失败'
         exit 1
     }
-    IFS= read -r first <"$temp" || true
+    IFS= read -r first < "$temp" || true
     [[ "$first" == '#!/usr/bin/env bash' || "$first" == '#!/bin/bash' ]] || {
         fail '下载内容不是有效 Bash 脚本'
         exit 1
@@ -1524,7 +1563,7 @@ update_script() (
         exit 1
     }
     target="${SCRIPT_TARGET:-/usr/local/bin/s}"
-    old_hash=$(sha256sum "$target" 2>/dev/null | awk '{print $1}' || true)
+    old_hash=$(sha256sum "$target" 2> /dev/null | awk '{print $1}' || true)
     new_hash=$(sha256sum "$temp" | awk '{print $1}')
     [[ -n "$old_hash" && "$old_hash" == "$new_hash" ]] && {
         info "管理脚本已是最新版本 v$version"
@@ -1545,10 +1584,95 @@ update_management_script() {
     }
 }
 
+# === 卸载清理 ===
+normalize_uninstall_path() {
+    local path=$1 directory part result=''
+    local -a parts
+    [[ $path == /* ]] || path="$PWD/$path"
+    if directory=$(cd -P -- "${path%/*}" 2> /dev/null && pwd -P); then
+        printf '%s/%s\n' "${directory%/}" "${path##*/}"
+        return 0
+    fi
+    IFS=/ read -r -a parts <<< "$path"
+    for part in "${parts[@]}"; do
+        case "$part" in
+            '' | .) ;;
+            ..) result=${result%/*} ;;
+            *) result+="/$part" ;;
+        esac
+    done
+    printf '%s\n' "${result:-/}"
+}
+
+check_uninstall_startup() {
+    local path=$1 unit=$2 target
+    [[ -e $path || -L $path ]] || return 0
+    if [[ -L $path ]]; then
+        [[ $path -ef $unit ]] && return 0
+        # 目标可能已删除；按路径段比较相对链接，避免依赖 GNU readlink 扩展
+        target=$(readlink "$path") || return 1
+        [[ $target == /* ]] || target="${path%/*}/$target"
+        [[ $(normalize_uninstall_path "$target") == "$(normalize_uninstall_path "$unit")" ]] && return 0
+    fi
+    fail "无法确认自启文件归属，未执行卸载：$path"
+}
+
+check_uninstall_services() {
+    # 卸载前验证服务归属，避免停止或删除使用其他配置的同名服务
+    local path command args target fragment
+    for path in "$SYSTEMD_UNIT" "$SYSTEMD_UNIT.bak" "$OPENRC_UNIT" "$OPENRC_UNIT.bak"; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        if [[ ! -f "$path" || -L "$path" ]]; then
+            fail "无法确认服务文件归属，未执行卸载: $path"
+            return 1
+        fi
+        if [[ "$path" == "$SYSTEMD_UNIT"* ]]; then
+            command=$(awk '/^ExecStart=/{sub(/^ExecStart=/, ""); print}' "$path") || return 1
+            [[ "$command" == /* && "$command" == *" run -c $CONFIG_FILE" ]] && continue
+        else
+            command=$(awk -F'"' '/^command=/{print $2}' "$path") || return 1
+            args=$(awk -F'"' '/^command_args=/{print $2}' "$path") || return 1
+            [[ "$command" == /* && "$args" == "run -c $CONFIG_FILE" ]] && continue
+        fi
+        fail "无法确认服务文件归属，未执行卸载: $path"
+        return 1
+    done
+    for path in "$SYSTEMD_STARTUP" "$OPENRC_STARTUP"; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        target="$OPENRC_UNIT"
+        [[ "$path" != "$SYSTEMD_STARTUP" ]] || target="$SYSTEMD_UNIT"
+        check_uninstall_startup "$path" "$target" || return 1
+    done
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        fragment=$(systemctl show sing-box.service -p FragmentPath --value 2> /dev/null 9>&-) || {
+            fail '无法检查 sing-box 服务归属，未执行卸载'
+            return 1
+        }
+        if [[ -n "$fragment" && "$fragment" != "$SYSTEMD_UNIT" ]]; then
+            fail "检测到外部 sing-box 服务，未执行卸载: $fragment"
+            return 1
+        fi
+    fi
+}
+
+# 同时检查命令结果和路径残留；只在全部清理成功后删除管理入口
+remove_uninstall_paths() {
+    local mode=$1 path
+    shift
+    for path in "$@"; do
+        [[ -e $path || -L $path ]] || continue
+        if ! rm "$mode" -- "$path" || [[ -e $path || -L $path ]]; then
+            fail "卸载文件清理失败：$path"
+            return 1
+        fi
+    done
+}
+
 uninstall() {
-    local answer
+    local answer leftover
     read_input answer '  确认卸载 sing-box、全部节点和管理脚本？(Y/N): ' || return 1
     [[ "$answer" == [yY] ]] || return 1
+    check_uninstall_services || return 1
     if ! svc_stop; then
         fail 'sing-box 停止失败，未执行卸载'
         return 1
@@ -1557,19 +1681,44 @@ uninstall() {
         fail '关闭 sing-box 开机自启失败，未执行卸载'
         return 1
     fi
-    rm -f -- "$SYSTEMD_UNIT" "$SYSTEMD_STARTUP" "$OPENRC_UNIT" "$OPENRC_STARTUP"
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload >/dev/null 2>&1 9>&- || true
-        systemctl reset-failed sing-box.service >/dev/null 2>&1 9>&- || true
+    if svc_active || svc_enabled; then
+        fail 'sing-box 服务或开机自启仍未关闭，未执行卸载'
+        return 1
     fi
-    rm -rf "$SINGBOX_DIR" "$PID_FILE" "$LOG_FILE" "$LOG_FILE".*
-    [[ "$SINGBOX_BIN" == "$CORE_INSTALL_BIN" ]] && rm -f -- "$CORE_INSTALL_BIN"
-    rm -f -- "${SCRIPT_TARGET:-/usr/local/bin/s}" "$LOCK_FILE" "$LOCK_PID_FILE"
-    rmdir "$(dirname "$PID_FILE")" >/dev/null 2>&1 || true
+    remove_uninstall_paths -f "$SYSTEMD_UNIT" "$SYSTEMD_UNIT.bak" "$SYSTEMD_STARTUP" "$OPENRC_UNIT" "$OPENRC_UNIT.bak" "$OPENRC_STARTUP" || return 1
+    if [[ "$INIT_SYSTEM" == systemd ]]; then
+        systemctl daemon-reload > /dev/null 2>&1 9>&- || {
+            fail '重新加载服务管理器失败，卸载未完成'
+            return 1
+        }
+        systemctl reset-failed sing-box.service > /dev/null 2>&1 9>&- || true
+    fi
+    # 默认核心路径属于脚本管理范围，不受当前探测到的外部核心路径影响
+    remove_uninstall_paths -f "$CORE_INSTALL_BIN" "$PID_FILE" "$LOG_FILE" "$LOG_FILE".* || return 1
+    remove_uninstall_paths -f "$CONFIG_FILE" "$CONFIG_FILE.bak" "$META_FILE" "$META_FILE.bak" || return 1
+    remove_uninstall_paths -rf "$SINGBOX_DIR"/.transaction.?????? "$SINGBOX_DIR"/.core.?????? \
+        "$SINGBOX_DIR"/.config.?????? "$SINGBOX_DIR"/.meta.?????? "$SINGBOX_DIR"/.script.?????? \
+        "$SINGBOX_DIR"/.recovery.?????? || return 1
+    # 目录内未知文件不属于清理清单，保留并明确提示
+    if [[ -d "$SINGBOX_DIR" ]]; then
+        leftover=$(find "$SINGBOX_DIR" -mindepth 1 -maxdepth 1 -print -quit) || {
+            fail "管理目录检查失败: $SINGBOX_DIR"
+            return 1
+        }
+        if [[ -n "$leftover" ]]; then
+            warn "管理目录包含未识别文件，已保留: $SINGBOX_DIR"
+        elif ! rmdir "$SINGBOX_DIR"; then
+            fail "管理目录清理失败: $SINGBOX_DIR"
+            return 1
+        fi
+    fi
+    remove_uninstall_paths -f "$LOCK_FILE" "$LOCK_PID_FILE" || return 1
+    rmdir "$(dirname "$PID_FILE")" > /dev/null 2>&1 || true
+    remove_uninstall_paths -f "${SCRIPT_TARGET:-/usr/local/bin/s}" || return 1
     success 'sing-box 及其相关文件已卸载'
 }
 
-# 菜单绘制与脚本入口
+# === 菜单绘制与脚本入口 ===
 display_width() {
     printf '%s' "$1" | LC_ALL=C awk '
         BEGIN {
@@ -1627,7 +1776,13 @@ menu() {
         clear_terminal
         count=$(node_count) || return 1
         core=$(core_version)
-        if [[ ! -x "$SINGBOX_BIN" ]]; then state='未安装'; elif svc_active; then state='运行中'; else state='已停止'; fi
+        if [[ ! -x "$SINGBOX_BIN" ]]; then
+            state='未安装'
+        elif svc_active; then
+            state='运行中'
+        else
+            state='已停止'
+        fi
         printf '\n%s  ╔═══════════════════════════════════════╗\n' "$BLUE"
         menu_row "    ${BLUE}sing-box 管理（当前节点：${GREEN}${count}${BLUE} 个）${NC}"
         menu_row "    ${BLUE}sing-box 状态：${GREEN}${state}${BLUE}${NC}"
@@ -1700,9 +1855,15 @@ main() {
     mkdir -p /run/lock || return 1
     mkdir -p "$SINGBOX_DIR" || return 1
     acquire_manager_lock || return 1
+    # 卸载不依赖配置有效性，损坏的 JSON 仍可通过命令行清理
+    if [[ "${1:-}" == --uninstall ]]; then
+        resolve_core > /dev/null 2>&1 || true
+        uninstall
+        return $?
+    fi
     init_state || return 1
     maintenance_cleanup
-    resolve_core >/dev/null 2>&1 || true
+    resolve_core > /dev/null 2>&1 || true
     SCRIPT_TARGET="${SCRIPT_TARGET:-/usr/local/bin/s}"
     case "${1:-}" in
         --version | -v)
@@ -1719,10 +1880,6 @@ main() {
             ;;
         --update-script)
             update_management_script
-            return $?
-            ;;
-        --uninstall)
-            uninstall
             return $?
             ;;
         '')
