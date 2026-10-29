@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.3.3"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -931,9 +931,9 @@ add_vless_node() {
         fail '伪装域名格式无效'
         return 1
     }
-    name="VLESS-TCP-REALITY-VISION-$port"
+    name="Vless-$port"
     read_input name "  节点名称 (默认 $name): " || return 1
-    name=${name:-"VLESS-TCP-REALITY-VISION-$port"}
+    name=${name:-"Vless-$port"}
     valid_name "$name" || {
         fail '节点名称不能为空、不能超过 80 字或包含控制字符'
         return 1
@@ -1143,7 +1143,7 @@ add_tls_node() {
 add_node() {
     local protocol
     require_core || return 1
-    printf '\n  请选择协议:\n\n  %s[1]%s Vless + Reality + Vision\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s AnyTLS\n  %s[4]%s Hysteria2\n  %s[0]%s 返回\n' \
+    printf '\n  请选择协议:\n\n  %s[1]%s Vless\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s AnyTLS\n  %s[4]%s Hysteria2\n  %s[0]%s 返回\n' \
         "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
     read_input protocol '  请选择协议: ' || return 1
     case "$protocol" in
@@ -1161,6 +1161,7 @@ add_node() {
 print_nodes() {
     jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE" |
         while IFS=$'\t' read -r index name protocol port; do
+            [[ "$protocol" != vless-reality ]] || protocol=Vless
             printf '  %s[%s]%s %s (%s) @ %s%s%s\n' "$GREEN" "$index" "$NC" "$name" "$protocol" "$BLUE" "$port" "$NC"
         done
 }
@@ -1202,6 +1203,7 @@ view_nodes() {
         return 0
     }
     while IFS=$'\t' read -r index name protocol port; do
+        [[ "$protocol" != vless-reality ]] || protocol=Vless
         printf '  %s[%s] %s (%s) @ %s%s\n' "$GREEN" "$index" "$name" "$protocol" "$port" "$NC"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$((index - 1))")" "$NC"
         printf '\n'
@@ -1295,7 +1297,7 @@ modify_vless_node() {
         public=${fields[6]-}
         sid=${fields[7]-}
         private=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag==$tag) | .tls.reality.private_key' "$CONFIG_FILE")
-        printf '\n  当前节点: %s%s%s (vless-reality) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
+        printf '\n  当前节点: %s%s%s (Vless) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改 UUID\n  %s[5]%s 修改伪装域名/SNI\n  %s[6]%s 重新生成 Reality 密钥和 Short ID\n  %s[0]%s 返回\n' \
             "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
