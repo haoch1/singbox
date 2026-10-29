@@ -2,14 +2,14 @@
 
 Linux sing-box 节点管理脚本，提供节点管理、服务控制、核心更新和卸载功能
 
-管理脚本版本：`1.3.1`
+管理脚本版本：`1.3.2`
 
 ## 功能与协议
 
 - VLESS + TCP + Reality + Vision
 - Shadowsocks 2022，使用 `2022-blake3-aes-128-gcm`
-- Hysteria2
 - AnyTLS，使用核心默认流量填充方案
+- Hysteria2
 - 节点的添加、查看、修改、删除、清空和分享链接生成
 - UUID、Reality 密钥、Short ID、密码和 TLS 自签名证书生成
 - systemd / OpenRC / direct 服务管理
@@ -19,8 +19,8 @@ Linux sing-box 节点管理脚本，提供节点管理、服务控制、核心�
 | --- | --- | --- |
 | VLESS + Reality + Vision | `443/TCP` | `VLESS-TCP-REALITY-VISION-端口` |
 | Shadowsocks 2022 | `8080/TCP、UDP` | `SS2022-端口` |
-| Hysteria2 | `8080/UDP` | `Hysteria2-端口` |
 | AnyTLS | `443/TCP` | `AnyTLS-端口` |
+| Hysteria2 | `8080/UDP` | `Hysteria2-端口` |
 
 监听端口支持自定义，空输入采用表中默认值。端口冲突按 TCP、UDP 分别检查；现有节点的端口保持不变。VLESS 默认 SNI 为 `www.bing.com`
 

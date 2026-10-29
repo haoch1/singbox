@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.2"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -1143,14 +1143,14 @@ add_tls_node() {
 add_node() {
     local protocol
     require_core || return 1
-    printf '\n  请选择协议:\n\n  %s[1]%s Vless + Reality + Vision\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s Hysteria2\n  %s[4]%s AnyTLS\n  %s[0]%s 返回\n' \
+    printf '\n  请选择协议:\n\n  %s[1]%s Vless + Reality + Vision\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s AnyTLS\n  %s[4]%s Hysteria2\n  %s[0]%s 返回\n' \
         "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
     read_input protocol '  请选择协议: ' || return 1
     case "$protocol" in
         1) add_vless_node ;;
         2) add_ss2022_node ;;
-        3) add_tls_node hysteria2 ;;
-        4) add_tls_node anytls ;;
+        3) add_tls_node anytls ;;
+        4) add_tls_node hysteria2 ;;
         0 | '') return 0 ;;
         *)
             fail '无效选择'
