@@ -2,18 +2,39 @@
 
 Linux sing-box 节点管理脚本，提供节点管理、服务控制、核心更新和卸载功能
 
-管理脚本版本：`1.2.8`
+管理脚本版本：`1.3.0`
 
-## 功能
+## 功能与协议
 
 - VLESS + TCP + Reality + Vision
 - Shadowsocks 2022，使用 `2022-blake3-aes-128-gcm`
+- Hysteria2
+- AnyTLS，使用核心默认流量填充方案
 - 节点的添加、查看、修改、删除、清空和分享链接生成
-- UUID、Reality 密钥、Short ID 和 Shadowsocks 密码生成
+- UUID、Reality 密钥、Short ID、密码和 TLS 自签名证书生成
 - systemd / OpenRC / direct 服务管理
 - 配置校验、事务备份和失败回滚
 
-VLESS 默认端口为 `8443`，默认 SNI 为 `www.bing.com`；Shadowsocks 2022 默认端口为 `8388`
+| 协议 | 默认监听端口 | 默认节点名称 |
+| --- | --- | --- |
+| VLESS + Reality + Vision | `443/TCP` | `VLESS-TCP-REALITY-VISION-端口` |
+| Shadowsocks 2022 | `8080/TCP、UDP` | `SS2022-端口` |
+| Hysteria2 | `8080/UDP` | `Hysteria2-端口` |
+| AnyTLS | `443/TCP` | `AnyTLS-端口` |
+
+监听端口支持自定义，空输入采用表中默认值。端口冲突按 TCP、UDP 分别检查；现有节点的端口保持不变。VLESS 默认 SNI 为 `www.bing.com`
+
+## TLS 节点
+
+Hysteria2、AnyTLS 使用 sing-box 1.12.0 或更新版本；Hysteria2 需要包含 QUIC 支持的核心。官方标准构建包含所需功能
+
+节点创建仅需服务器地址、监听端口和节点名称，三项均提供默认值。密码使用 32 字节随机数据，以 64 位十六进制字符串保存。TLS SNI 初始值采用服务器地址，每个节点由核心独立生成有效期为 10 年的自签名证书及私钥
+
+证书与私钥内嵌于 `config.json`，随节点删除或卸载清理。分享链接包含 `insecure=1`，客户端不执行常规证书信任链校验；Hysteria2 链接另含 `pinSHA256` 证书指纹，支持该参数的客户端可执行指纹校验
+
+修改菜单包含节点名称、客户端连接地址、监听端口和密码。密码支持自定义或随机生成；节点编辑保留现有证书及 SNI
+
+Hysteria2 未启用混淆、端口跳跃或固定带宽。TLS 节点不使用 ACME 申请证书。服务器防火墙及 NAT 映射应与实际监听端口和传输协议一致，Hysteria2 的监听端口使用 UDP
 
 ## 安装
 
@@ -52,7 +73,7 @@ VLESS 默认端口为 `8443`，默认 SNI 为 `www.bing.com`；Shadowsocks 2022 
 | --- | --- |
 | `/usr/local/bin/s` | 管理脚本 |
 | `/usr/local/bin/sing-box` | 托管核心 |
-| `/usr/local/etc/sing-box/config.json` | 核心配置 |
+| `/usr/local/etc/sing-box/config.json` | 核心配置及自动生成的 TLS 证书、私钥 |
 | `/usr/local/etc/sing-box/nodes.json` | 节点元数据 |
 | `/etc/systemd/system/sing-box.service` | systemd 服务 |
 | `/etc/init.d/sing-box` | OpenRC 服务 |

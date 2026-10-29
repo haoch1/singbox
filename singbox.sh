@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.2.8"
+SCRIPT_VERSION="1.3.0"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -26,8 +26,10 @@ SYSTEMD_UNIT="/etc/systemd/system/sing-box.service"
 SYSTEMD_STARTUP="/etc/systemd/system/multi-user.target.wants/sing-box.service"
 OPENRC_UNIT="/etc/init.d/sing-box"
 OPENRC_STARTUP="/etc/runlevels/default/sing-box"
-DEFAULT_PORT=8443
-DEFAULT_SS_PORT=8388
+DEFAULT_PORT=443
+DEFAULT_SS_PORT=8080
+DEFAULT_HY2_PORT=8080
+DEFAULT_ANYTLS_PORT=443
 DEFAULT_SNI="www.bing.com"
 SS2022_METHOD="2022-blake3-aes-128-gcm"
 INIT_SYSTEM="direct"
@@ -517,18 +519,33 @@ node_fields() {
     jq -j --argjson i "$1" '
         .nodes[$i]
         | [(.protocol // "vless-reality"), .server, .port, .name,
-           .uuid, .sni, .public_key, .short_id, .password]
+           .uuid, .sni, .public_key, .short_id, .password,
+           (.insecure // false), (.cert_sha256 // "")]
         | .[] | tostring + "\u0000"' "$META_FILE"
 }
 
 port_conflict() {
     local port="$1" exclude="${2:-}" mode="${3:-tcp}"
-    jq -e --argjson p "$port" --arg e "$exclude" '.nodes[]? | select((.port|tonumber) == $p and ($e == "" or (.tag // "") != $e))' "$META_FILE" > /dev/null 2>&1 && return 0
-    jq -e --argjson p "$port" --arg e "$exclude" '.inbounds[]? | select((.listen_port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))' "$CONFIG_FILE" > /dev/null 2>&1 && return 0
+    # 按监听传输检查冲突；TCP 与 UDP 可以使用同一个端口号
+    jq -e --argjson p "$port" --arg e "$exclude" --arg mode "$mode" '
+        .nodes[]? | select((.port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))
+        | (.protocol // "vless-reality") as $protocol
+        | select($mode == "tcp_udp" or $protocol == "ss2022"
+            or ($mode == "udp" and $protocol == "hysteria2")
+            or ($mode == "tcp" and $protocol != "hysteria2"))' "$META_FILE" > /dev/null 2>&1 && return 0
+    jq -e --argjson p "$port" --arg e "$exclude" --arg mode "$mode" '
+        .inbounds[]? | select((.listen_port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))
+        | (if .type == "hysteria2" or .type == "tuic" or .type == "hysteria" then ["udp"]
+           elif .type == "vless" or .type == "anytls" then ["tcp"]
+           elif .network == "tcp" or .network == "udp" then [.network]
+           else ["tcp", "udp"] end) as $networks
+        | select($mode == "tcp_udp" or ($networks | index($mode)) != null)' "$CONFIG_FILE" > /dev/null 2>&1 && return 0
     if command -v ss > /dev/null 2>&1; then
-        ss -H -ltn 2> /dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
-        if [[ "$mode" == tcp_udp ]]; then
-            ss -H -lun 2> /dev/null | awk -v p=":$port" '$5 ~ p"$" || $4 ~ p"$" {found=1} END {exit !found}' && return 0
+        if [[ "$mode" != udp ]]; then
+            ss -H -ltn 2> /dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
+        fi
+        if [[ "$mode" != tcp ]]; then
+            ss -H -lun 2> /dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}' && return 0
         fi
     fi
     return 1
@@ -559,6 +576,18 @@ build_ss2022_link() {
     printf 'ss://%s@%s:%s#%s' "$userinfo" "$host" "$port" "$(uri_escape "$name")"
 }
 
+build_tls_link() {
+    local protocol="$1" server="$2" port="$3" password="$4" sni="$5" name="$6"
+    local insecure="${7:-false}" fingerprint="${8:-}" host
+    host=$(format_server_for_uri "$server")
+    printf '%s://%s@%s:%s/?sni=%s&insecure=%s' "$protocol" "$(uri_escape "$password")" \
+        "$host" "$port" "$(uri_escape "$sni")" "$([[ "$insecure" == true ]] && printf 1 || printf 0)"
+    if [[ "$protocol" == hysteria2 ]]; then
+        [[ -z "$fingerprint" ]] || printf '&pinSHA256=%s' "$(uri_escape "$fingerprint")"
+    fi
+    printf '#%s' "$(uri_escape "$name")"
+}
+
 build_node_link() {
     local index="$1" protocol server port name uuid sni public sid password value
     local -a fields=()
@@ -580,12 +609,16 @@ build_node_link() {
             build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name"
             ;;
         ss2022) build_ss2022_link "$server" "$port" "$password" "$name" ;;
+        hysteria2 | anytls)
+            build_tls_link "$protocol" "$server" "$port" "$password" "$sni" "$name" \
+                "${fields[9]:-false}" "${fields[10]:-}"
+            ;;
         *) return 1 ;;
     esac
 }
 
 check_config() {
-    local mode="${1:-verbose}"
+    local mode="${1:-verbose}" file="${2:-$CONFIG_FILE}"
     resolve_core > /dev/null 2>&1 || true
     [[ -x "$SINGBOX_BIN" ]] || {
         warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'
@@ -593,7 +626,7 @@ check_config() {
     }
     [[ "$mode" == quiet ]] || info '正在检查 config.json'
     local result
-    if result=$("$SINGBOX_BIN" check -c "$CONFIG_FILE" 2>&1); then
+    if result=$("$SINGBOX_BIN" check -c "$file" 2>&1); then
         [[ "$mode" == quiet ]] || success 'config.json 配置检查通过'
         return 0
     fi
@@ -606,7 +639,9 @@ check_config() {
 
 apply_transaction() {
     # 同时备份配置、元数据和服务单元，以便失败后恢复一致状态
-    local new_config="$1" new_meta="$2" count="$3" backup active=0 enabled=0 rollback_ok=1 unit_path unit_exists=0
+    local new_config="$1" new_meta="$2" count="$3" backup active=0 enabled=0 rollback_ok=1 unit_path unit_exists=0 service_changed=0
+    # 先校验候选配置，避免将无效证书或协议字段写入正在运行的配置
+    check_config quiet "$new_config" || return 1
     backup=$(mktemp -d "$SINGBOX_DIR/.recovery.XXXXXX") || {
         fail '无法创建事务备份'
         return 1
@@ -639,7 +674,11 @@ apply_transaction() {
         fi
         svc_reload
         if ((active)); then
-            svc_active || svc_start > /dev/null 2>&1 || rollback_ok=0
+            if ((service_changed)); then
+                svc_restart > /dev/null 2>&1 || rollback_ok=0
+            else
+                svc_active || svc_start > /dev/null 2>&1 || rollback_ok=0
+            fi
         else
             svc_active && svc_stop > /dev/null 2>&1 || { svc_active && rollback_ok=0; }
         fi
@@ -661,10 +700,6 @@ apply_transaction() {
         rollback_transaction
         return 1
     fi
-    if ! check_config quiet; then
-        rollback_transaction
-        return 1
-    fi
     if ((count > 0)); then
         if ! write_service_unit; then
             rollback_transaction
@@ -674,11 +709,12 @@ apply_transaction() {
             rollback_transaction
             return 1
         fi
+        service_changed=1
         if ((active)); then
-            if ! svc_restart && ! svc_active; then svc_start || {
+            if ! svc_restart; then
                 rollback_transaction
                 return 1
-            }; fi
+            fi
             svc_active || {
                 rollback_transaction
                 return 1
@@ -690,6 +726,7 @@ apply_transaction() {
             }
         fi
     else
+        service_changed=1
         if (svc_active && ! svc_stop) || (svc_enabled && ! svc_disable); then
             rollback_transaction
             return 1
@@ -816,6 +853,48 @@ require_core() {
         warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'
         return 1
     }
+}
+
+# === Hysteria2 与 AnyTLS 的证书和凭据 ===
+require_tls_core() {
+    local version
+    require_core || return 1
+    version=$(core_version)
+    if [[ "$version" =~ ^v([0-9]+)\.([0-9]+)\. ]] &&
+        ((BASH_REMATCH[1] > 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] >= 12))); then
+        return 0
+    fi
+    fail 'Hysteria2 和 AnyTLS 需要 sing-box 1.12.0 或更新版本，请先执行菜单 [9]'
+}
+
+valid_password() {
+    [[ -n "$1" && ${#1} -le 256 && "$1" != *[[:cntrl:]]* ]]
+}
+
+certificate_fingerprint() {
+    # 对叶证书 DER 求 SHA-256，与 Hysteria2 URI 的 pinSHA256 定义一致
+    printf '%s\n' "$1" | awk '/-----BEGIN CERTIFICATE-----/{body=1; next} /-----END CERTIFICATE-----/{exit} body{print}' |
+        base64 -d | sha256sum | awk '{print $1}'
+}
+
+generate_self_signed_tls() {
+    local protocol="$1" sni="$2" pair certificate private
+    pair=$("$SINGBOX_BIN" generate tls-keypair "$sni" --months 120 2> /dev/null) || {
+        fail '生成 TLS 证书失败'
+        return 1
+    }
+    certificate=$(awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' <<< "$pair")
+    private=$(awk '/-----BEGIN .*PRIVATE KEY-----/,/-----END .*PRIVATE KEY-----/' <<< "$pair")
+    [[ -n "$certificate" && -n "$private" ]] || {
+        fail '生成 TLS 证书失败'
+        return 1
+    }
+    # 证书随节点配置进入原有事务，删除节点时同步清除，无额外文件或 ACME 监听端口
+    NEW_TLS_JSON=$(jq -cn --arg sni "$sni" --arg cert "$certificate" --arg key "$private" --arg protocol "$protocol" '
+        {enabled:true,server_name:$sni,certificate:[$cert],key:[$key]}
+        + (if $protocol == "hysteria2" then {alpn:["h3"]} else {} end)') || return 1
+    NEW_TLS_FINGERPRINT=$(certificate_fingerprint "$certificate") || return 1
+    [[ "$NEW_TLS_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || return 1
 }
 
 add_vless_node() {
@@ -962,15 +1041,102 @@ add_ss2022_node() {
     fi
 }
 
+add_tls_node() {
+    local protocol="$1" label default_port mode server port name password id tag
+    local new_config new_meta current_count
+    require_tls_core || return 1
+    if [[ "$protocol" == hysteria2 ]]; then
+        label=Hysteria2
+        default_port=$DEFAULT_HY2_PORT
+        mode=udp
+    else
+        label=AnyTLS
+        default_port=$DEFAULT_ANYTLS_PORT
+        mode=tcp
+    fi
+    server=$(server_ip_guess)
+    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
+    server=${server:-$(server_ip_guess)}
+    while [[ -z "$server" ]] || ! valid_text "$server"; do
+        fail '请输入有效的 IP 或域名'
+        read_input server '  服务器地址: ' || return 1
+    done
+    while true; do
+        read_input port "  监听端口 (默认 $default_port): " || return 1
+        port=${port:-$default_port}
+        valid_port "$port" || {
+            fail '端口应为 1–65535'
+            continue
+        }
+        port=$((10#$port))
+        port_conflict "$port" '' "$mode" && {
+            fail "${mode^^} 端口 $port 已被占用"
+            continue
+        }
+        break
+    done
+    name="$label-$port"
+    read_input name "  节点名称 (默认 $name): " || return 1
+    name=${name:-"$label-$port"}
+    valid_name "$name" || {
+        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
+        return 1
+    }
+    password=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
+        fail '生成节点密码失败'
+        return 1
+    }
+    [[ "$password" =~ ^[0-9a-f]{64}$ ]] || {
+        fail '生成节点密码失败'
+        return 1
+    }
+    generate_self_signed_tls "$protocol" "$server" || return 1
+    id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null) || return 1
+    [[ "$id" =~ ^[0-9a-f]{16}$ ]] || return 1
+    tag="$protocol-in-$id"
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
+    jq --arg protocol "$protocol" --arg tag "$tag" --arg password "$password" \
+        --argjson port "$port" --argjson tls "$NEW_TLS_JSON" '
+        .inbounds += [{type:$protocol,tag:$tag,listen:"::",listen_port:$port,
+            users:[{password:$password}],tls:$tls}]' \
+        "$CONFIG_FILE" > "$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq --arg protocol "$protocol" --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" \
+        --arg password "$password" --arg sni "$server" \
+        --arg fingerprint "$NEW_TLS_FINGERPRINT" --argjson port "$port" '
+        .nodes += [{protocol:$protocol,id:$id,tag:$tag,name:$name,server:$server,port:$port,password:$password,
+            sni:$sni,insecure:true,cert_sha256:$fingerprint}]' \
+        "$META_FILE" > "$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    current_count=$(node_count)
+    if apply_transaction "$new_config" "$new_meta" "$((current_count + 1))"; then
+        success "节点 [$name] 添加成功"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$current_count")" "$NC"
+    else
+        rm -f "$new_config" "$new_meta"
+        return 1
+    fi
+}
+
 add_node() {
     local protocol
     require_core || return 1
-    printf '\n  请选择协议:\n\n  %s[1]%s Vless + Reality + Vision\n  %s[2]%s Shadowsocks 2022\n  %s[0]%s 返回\n' \
-        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+    printf '\n  请选择协议:\n\n  %s[1]%s Vless + Reality + Vision\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s Hysteria2\n  %s[4]%s AnyTLS\n  %s[0]%s 返回\n' \
+        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
     read_input protocol '  请选择协议: ' || return 1
     case "$protocol" in
         1) add_vless_node ;;
         2) add_ss2022_node ;;
+        3) add_tls_node hysteria2 ;;
+        4) add_tls_node anytls ;;
         0 | '') return 0 ;;
         *)
             fail '无效选择'
@@ -1052,7 +1218,7 @@ apply_vless_node_update() {
         return 1
     fi
     jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
-        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.handshake |= del(.domain_resolver) | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" > "$new_config" || {
+        '(.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].uuid=$uuid | .tls.server_name=$sni | .tls.reality.handshake.server=$sni | .tls.reality.private_key=$private | .tls.reality.short_id=[$sid])' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
@@ -1088,6 +1254,10 @@ confirm_node_update() {
     read_input answer '  确认保存并应用本次修改？[Y/N]: ' || return 1
     [[ "$answer" =~ ^[nN]$ ]] && {
         warn '已取消本次修改'
+        return 1
+    }
+    [[ -z "$answer" || "$answer" == [yY] ]] || {
+        fail '请输入 Y 或 N'
         return 1
     }
     return 0
@@ -1197,13 +1367,13 @@ modify_vless_node() {
             4)
                 read_input value '  请输入新 UUID (回车随机生成): ' || return 1
                 if [[ -z "$value" ]]; then
-                    value=$($SINGBOX_BIN generate uuid 2> /dev/null)
+                    value=$("$SINGBOX_BIN" generate uuid 2> /dev/null)
                     [[ -n "$value" ]] || {
                         fail 'UUID 自动生成失败'
                         continue
                     }
                 fi
-                [[ "$value" =~ ^[0-9a-fA-F-]{36}$ ]] || {
+                [[ "$value" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || {
                     fail 'UUID 格式无效'
                     continue
                 }
@@ -1265,7 +1435,7 @@ modify_vless_node() {
 }
 
 apply_ss2022_node_update() {
-    local tag="$1" name="$2" server="$3" port="$4" password="$5" method="$SS2022_METHOD"
+    local tag="$1" name="$2" server="$3" port="$4" password="$5"
     local new_config new_meta count config_matches meta_matches
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
     new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
@@ -1416,6 +1586,147 @@ modify_ss2022_node() {
     done
 }
 
+apply_tls_node_update() {
+    local index="$1" tag="$2" protocol="$3" name="$4" server="$5" port="$6" password="$7"
+    local new_config new_meta count
+    # 只更新明确匹配的一个节点，保留证书、SNI 和其他未编辑字段
+    jq -e --arg tag "$tag" --arg protocol "$protocol" '
+        [.inbounds[]? | select(.tag==$tag)] | length == 1 and .[0].type==$protocol' "$CONFIG_FILE" > /dev/null &&
+        jq -e --arg tag "$tag" --arg protocol "$protocol" --argjson i "$index" '
+            ([.nodes[]? | select(.tag==$tag)] | length) == 1 and .nodes[$i].tag==$tag
+            and .nodes[$i].protocol==$protocol' "$META_FILE" > /dev/null || {
+        fail '目标节点信息不一致，未应用修改，请重新进入菜单'
+        return 1
+    }
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
+    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" '
+        (.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].password=$password)' "$CONFIG_FILE" > "$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '
+        (.nodes[] | select(.tag==$tag)) |= (.name=$name | .server=$server | .port=$port | .password=$password)' "$META_FILE" > "$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq -e --arg tag "$tag" --arg password "$password" --argjson port "$port" '
+        any(.inbounds[]; .tag==$tag and .listen_port==$port and .users[0].password==$password)' "$new_config" > /dev/null &&
+        jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '
+            any(.nodes[]; .tag==$tag and .name==$name and .server==$server and .port==$port and .password==$password)' "$new_meta" > /dev/null || {
+        rm -f "$new_config" "$new_meta"
+        fail '节点修改结果校验失败'
+        return 1
+    }
+    count=$(node_count)
+    if apply_transaction "$new_config" "$new_meta" "$count"; then
+        success "节点 [$name] 修改成功"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$index")" "$NC"
+    else
+        rm -f "$new_config" "$new_meta"
+        return 1
+    fi
+}
+
+modify_tls_node() {
+    local index="$1" tag protocol name server port password
+    local choice value field old_value network
+    local -a fields
+    tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
+    while true; do
+        fields=()
+        while IFS= read -r -d '' field; do fields+=("$field"); done < <(node_fields "$index")
+        protocol=${fields[0]-}
+        server=${fields[1]-}
+        port=${fields[2]-}
+        name=${fields[3]-}
+        password=${fields[8]-}
+        network=tcp
+        [[ "$protocol" != hysteria2 ]] || network=udp
+        printf '\n  当前节点: %s%s%s (%s) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
+        printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改密码\n' \
+            "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+        printf '  %s[0]%s 返回\n' "$GREEN" "$NC"
+        read_input choice '  请选择修改项: ' || return 1
+        case "$choice" in
+            0) return 0 ;;
+            1)
+                read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
+                value=${value:-$name}
+                valid_name "$value" || {
+                    fail '节点名称无效'
+                    continue
+                }
+                printf '  节点名称：%s\n' "$value"
+                old_value=$name
+                name=$value
+                ;;
+            2)
+                read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1
+                value=${value:-$server}
+                valid_text "$value" || {
+                    fail '客户端连接地址无效'
+                    continue
+                }
+                printf '  客户端连接地址：%s\n' "$value"
+                old_value=$server
+                server=$value
+                ;;
+            3)
+                read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
+                value=${value:-$port}
+                valid_port "$value" || {
+                    fail '端口应为 1–65535'
+                    continue
+                }
+                value=$((10#$value))
+                if ((value != port)) && port_conflict "$value" "$tag" "$network"; then
+                    fail "${network^^} 端口 $value 已被占用"
+                    continue
+                fi
+                printf '  监听端口：%s\n' "$value"
+                old_value=$port
+                port=$value
+                ;;
+            4)
+                read_input value '  请输入新密码 (回车随机生成): ' || return 1
+                if [[ -z "$value" ]]; then
+                    value=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
+                        fail '生成节点密码失败'
+                        continue
+                    }
+                fi
+                valid_password "$value" || {
+                    fail '密码不能为空、不能超过 256 字或包含控制字符'
+                    continue
+                }
+                printf '  密码：%s\n' "$value"
+                old_value=$password
+                password=$value
+                ;;
+            *)
+                fail '无效选择'
+                continue
+                ;;
+        esac
+        if [[ "$value" == "$old_value" ]]; then
+            pause_enter '  按回车返回修改节点菜单...'
+            continue
+        fi
+        confirm_node_update || {
+            ((MENU_CANCELLED || INPUT_EOF)) && return 1
+            continue
+        }
+        if ! apply_tls_node_update "$index" "$tag" "$protocol" "$name" "$server" "$port" "$password"; then
+            return 1
+        fi
+        pause_enter '  按回车返回修改节点菜单...'
+    done
+}
+
 modify_node() {
     local index protocol
     require_core || return 1
@@ -1424,6 +1735,7 @@ modify_node() {
     case "$protocol" in
         vless-reality) modify_vless_node "$index" ;;
         ss2022) modify_ss2022_node "$index" ;;
+        hysteria2 | anytls) modify_tls_node "$index" ;;
         *)
             fail '节点协议不受支持'
             return 1
