@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -520,7 +520,7 @@ node_fields() {
         .nodes[$i]
         | [(.protocol // "vless-reality"), .server, .port, .name,
            .uuid, .sni, .public_key, .short_id, .password,
-           (.insecure // false), (.cert_sha256 // "")]
+           (.insecure // false), (.cert_sha256 // ""), (.obfs_password // "")]
         | .[] | tostring + "\u0000"' "$META_FILE"
 }
 
@@ -578,12 +578,14 @@ build_ss2022_link() {
 
 build_tls_link() {
     local protocol="$1" server="$2" port="$3" password="$4" sni="$5" name="$6"
-    local insecure="${7:-false}" fingerprint="${8:-}" host
+    local insecure="${7:-false}" fingerprint="${8:-}" obfs_password="${9:-}" host
     host=$(format_server_for_uri "$server")
     printf '%s://%s@%s:%s/?sni=%s&insecure=%s' "$protocol" "$(uri_escape "$password")" \
         "$host" "$port" "$(uri_escape "$sni")" "$([[ "$insecure" == true ]] && printf 1 || printf 0)"
     if [[ "$protocol" == hysteria2 ]]; then
         [[ -z "$fingerprint" ]] || printf '&pinSHA256=%s' "$(uri_escape "$fingerprint")"
+        # 只为实际启用混淆的节点携带参数，已有无混淆节点的链接保持可用
+        [[ -z "$obfs_password" ]] || printf '&obfs=salamander&obfs-password=%s' "$(uri_escape "$obfs_password")"
     fi
     printf '#%s' "$(uri_escape "$name")"
 }
@@ -611,7 +613,7 @@ build_node_link() {
         ss2022) build_ss2022_link "$server" "$port" "$password" "$name" ;;
         hysteria2 | anytls)
             build_tls_link "$protocol" "$server" "$port" "$password" "$sni" "$name" \
-                "${fields[9]:-false}" "${fields[10]:-}"
+                "${fields[9]:-false}" "${fields[10]:-}" "${fields[11]:-}"
             ;;
         *) return 1 ;;
     esac
@@ -1043,7 +1045,7 @@ add_ss2022_node() {
 
 add_tls_node() {
     local protocol="$1" label default_port mode server port name password id tag
-    local new_config new_meta current_count
+    local new_config new_meta current_count obfs_password=''
     require_tls_core || return 1
     if [[ "$protocol" == hysteria2 ]]; then
         label=Hysteria2
@@ -1090,6 +1092,16 @@ add_tls_node() {
         fail '生成节点密码失败'
         return 1
     }
+    if [[ "$protocol" == hysteria2 ]]; then
+        obfs_password=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
+            fail '生成混淆密码失败'
+            return 1
+        }
+        [[ "$obfs_password" =~ ^[0-9a-f]{64}$ ]] || {
+            fail '生成混淆密码失败'
+            return 1
+        }
+    fi
     generate_self_signed_tls "$protocol" "$server" || return 1
     id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null) || return 1
     [[ "$id" =~ ^[0-9a-f]{16}$ ]] || return 1
@@ -1100,18 +1112,20 @@ add_tls_node() {
         return 1
     }
     jq --arg protocol "$protocol" --arg tag "$tag" --arg password "$password" \
-        --argjson port "$port" --argjson tls "$NEW_TLS_JSON" '
+        --arg obfs_password "$obfs_password" --argjson port "$port" --argjson tls "$NEW_TLS_JSON" '
         .inbounds += [{type:$protocol,tag:$tag,listen:"::",listen_port:$port,
-            users:[{password:$password}],tls:$tls}]' \
+            users:[{password:$password}],tls:$tls}
+            + (if $protocol == "hysteria2" then {obfs:{type:"salamander",password:$obfs_password}} else {} end)]' \
         "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
     jq --arg protocol "$protocol" --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" \
         --arg password "$password" --arg sni "$server" \
-        --arg fingerprint "$NEW_TLS_FINGERPRINT" --argjson port "$port" '
+        --arg fingerprint "$NEW_TLS_FINGERPRINT" --arg obfs_password "$obfs_password" --argjson port "$port" '
         .nodes += [{protocol:$protocol,id:$id,tag:$tag,name:$name,server:$server,port:$port,password:$password,
-            sni:$sni,insecure:true,cert_sha256:$fingerprint}]' \
+            sni:$sni,insecure:true,cert_sha256:$fingerprint}
+            + (if $protocol == "hysteria2" then {obfs_password:$obfs_password} else {} end)]' \
         "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
