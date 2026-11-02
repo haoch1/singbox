@@ -22,7 +22,7 @@ import time
 import unicodedata
 
 MAX_FRAME = 4 * 1024 * 1024
-STATS_VERSION = "1.3.7"
+STATS_VERSION = "1.3.8"
 OWNER = "singbox-local-stats-v1"
 API_TAG = "singbox-local-stats-api"
 RED = "\033[0;31m"
@@ -416,8 +416,8 @@ def daemon(directory):
 
 def human(value):
     number = float(value)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if number < 1024 or unit == "TiB":
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if number < 1024 or unit == "TB":
             return f"{number:.2f} {unit}"
         number /= 1024
 
@@ -495,12 +495,12 @@ def print_traffic_rows(rows, columns):
     if columns < 64:
         for target, up, down in rows:
             result_field("域名/IP", target)
-            for label, value in (("上传", up), ("下载", down), ("合计", up + down)):
+            for label, value in (("上传流量", up), ("下载流量", down), ("合计流量", up + down)):
                 result_field(label, human(value))
             print()
         return
     target_width = min(40, columns - 44)
-    headers = aligned("域名/IP", target_width) + "".join(aligned(label, 14) for label in ("上传", "下载", "合计"))
+    headers = aligned("域名/IP", target_width) + "".join(aligned(label, 14) for label in ("上传流量", "下载流量", "合计流量"))
     print(f"  {BLUE}{headers}{NC}")
     for target, up, down in rows:
         values = "".join(aligned(human(value), 14) for value in (up, down, up + down))
@@ -571,8 +571,8 @@ def query_data(directory, args):
         started = int(meta_get(db, "started", "0"))
         result_field("开始记录", dt.datetime.fromtimestamp(started / 1000).strftime("%Y-%m-%d %H:%M:%S"))
         result_field("最近保存", dt.datetime.fromtimestamp(int(meta_get(db, "last_flush", "0")) / 1000).strftime("%Y-%m-%d %H:%M:%S"))
-        for label, value in (("上传", human(summary[0])), ("下载", human(summary[1])),
-                             ("合计", human(summary[0] + summary[1])), ("连接", str(summary[2]))):
+        for label, value in (("上传流量", human(summary[0])), ("下载流量", human(summary[1])),
+                             ("合计流量", human(summary[0] + summary[1])), ("连接数量", str(summary[2]))):
             result_field(label, value)
         print()
         rows = db.execute("SELECT target,sum(up),sum(down) FROM " + table + where +
