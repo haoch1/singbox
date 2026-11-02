@@ -22,7 +22,7 @@ import time
 import unicodedata
 
 MAX_FRAME = 4 * 1024 * 1024
-STATS_VERSION = "1.3.6"
+STATS_VERSION = "1.3.7"
 OWNER = "singbox-local-stats-v1"
 API_TAG = "singbox-local-stats-api"
 RED = "\033[0;31m"
@@ -697,6 +697,29 @@ class Management:
         except (OSError, ValueError):
             return 0
 
+    def state(self):
+        if self.pid():
+            try:
+                with closing(database(self.directory, True)) as db:
+                    status = meta_get(db, "status")
+                if status in ("采集中", "等待核心连接"):
+                    return status
+            except (OSError, ValueError, sqlite3.Error):
+                pass
+            return "启动中"
+        if not self.settings_path.exists():
+            return "未开启"
+        try:
+            settings = self.settings()
+            if settings.get("enabled"):
+                return "未启动"
+            config_path = self.context.get("CONFIG_FILE", settings.get("context", {}).get("CONFIG_FILE"))
+            if config_path and any(v.get("tag") == API_TAG for v in read_json(config_path).get("services", [])):
+                return "待恢复"
+            return "已停止"
+        except (OSError, ValueError):
+            return "配置异常"
+
     def run(self, args):
         return subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True).returncode == 0
 
@@ -816,12 +839,33 @@ class Management:
         original = read_json(self.context["CONFIG_FILE"])
         metadata = read_json(self.context["META_FILE"])
         previous = self.settings() if self.settings_path.exists() else None
-        if previous and previous.get("enabled"):
-            self.start()
+        existing = [v for v in original.get("services", []) if v.get("tag") == API_TAG]
+        if existing:
+            if not previous or existing != [api_service(previous)]:
+                raise ValueError("统计 API 标识已存在且归属不匹配，未接管外部配置")
+            rule = sniff_rule(metadata)
+            if original.get("route", {}).get("rules", []).count(rule) != 1:
+                raise ValueError("统计域名识别规则不完整，请先停止统计后重新开启")
+            # 配置已应用但采集启动中断时，复用自己的接口，不检测或更换已占用的端口
+            settings = dict(previous, enabled=True, context=self.context)
+            if not previous.get("enabled"):
+                settings["resume"] = str(time.time_ns())
+                initialize(self.directory)
+            write_settings(self.directory, settings)
+            was_running = bool(self.pid())
+            try:
+                self.start()
+            except BaseException:
+                try:
+                    if not was_running:
+                        self.stop()
+                finally:
+                    write_settings(self.directory, previous)
+                raise
             message("成功", "流量统计已开启")
             return
-        if not previous and any(s.get("tag") == API_TAG for s in original.get("services", [])):
-            raise ValueError("统计 API 标识已存在，未接管外部配置")
+        if previous and previous.get("enabled"):
+            raise ValueError("统计 API 缺失，请先停止统计后重新开启")
         port = int(previous["port"]) if previous else 9090
         while True:
             try:
@@ -874,16 +918,19 @@ class Management:
 
     def disable(self):
         settings = self.settings()
+        was_running = bool(self.pid())
         self.stop()
-        if settings.get("enabled"):
-            try:
-                original = read_json(self.context["CONFIG_FILE"])
+        try:
+            original = read_json(self.context["CONFIG_FILE"])
+            # 关闭标志不能替代配置归属检查，失败或中断后仍可能残留本组件的接口
+            if settings.get("enabled") or any(v.get("tag") == API_TAG for v in original.get("services", [])):
                 metadata = read_json(self.context["META_FILE"])
                 candidate = prepare_config(settings, original, json.loads(json.dumps(original)), metadata, metadata, "disable")
                 self.apply(candidate)
-            except Exception:
+        except Exception:
+            if was_running:
                 self.start()
-                raise
+            raise
         settings["enabled"] = False
         write_settings(self.directory, settings)
         message("成功", "流量统计已停止，历史数据已保留")
@@ -943,19 +990,18 @@ class Management:
         args.node = prompt("节点序号 (回车查询全部，0 返回): ")
         if args.node == "0":
             raise Cancelled()
-        args.target = prompt("域名/IP (回车查询全部): ")
         print()
         query_data(self.directory, args)
 
     def menu(self):
         while True:
             clear_terminal()
-            state = "运行中" if self.pid() else "已停止" if self.settings_path.exists() else "未开启"
+            state = self.state()
             menu_frame("sing-box 流量统计", [
                 ("查询统计", [(1, "查看统计")]),
                 ("采集管理", [(2, "开启统计"), (3, "停止统计")]),
                 ("数据维护", [(4, "清空统计"), (5, "卸载统计")])],
-                [("采集状态", state), ("管理脚本版本", "v" + STATS_VERSION)])
+                [("采集状态", state)])
             try:
                 choice = prompt("请输入选项 [0-5]: ")
                 if choice == "0":
