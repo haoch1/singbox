@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import signal
 import socket
 import sqlite3
@@ -21,9 +22,17 @@ import time
 import unicodedata
 
 MAX_FRAME = 4 * 1024 * 1024
-STATS_VERSION = "1.3.5"
+STATS_VERSION = "1.3.6"
 OWNER = "singbox-local-stats-v1"
 API_TAG = "singbox-local-stats-api"
+RED = "\033[0;31m"
+GREEN = "\033[0;32m"
+YELLOW = "\033[0;33m"
+CYAN = "\033[0;36m"
+BLUE = "\033[1;36m"
+NC = "\033[0m"
+MENU_WIDTH = 39
+ANSI_COLOR = re.compile(r"\033\[[0-9;]*m")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS nodes(tag TEXT PRIMARY KEY,name TEXT,protocol TEXT);
@@ -413,16 +422,89 @@ def human(value):
         number /= 1024
 
 
+def character_width(char):
+    if unicodedata.combining(char) or unicodedata.category(char).startswith("C"):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in "WF" else 1
+
+
+def display_width(value):
+    # 与主菜单一样按显示列补齐，不依赖服务器是否配置 UTF-8 locale
+    return sum(character_width(char) for char in ANSI_COLOR.sub("", str(value)))
+
+
 def aligned(value, width):
     result = ""
     count = 0
     for char in clean(value):
-        size = 2 if unicodedata.east_asian_width(char) in "WF" else 1
+        size = character_width(char)
         if count + size > width:
             break
         result += char
         count += size
     return result + " " * (width - count)
+
+
+def clear_terminal():
+    if sys.stdout.isatty():
+        print("\033[3J\033[2J\033[H\033[0m", end="")
+
+
+def menu_row(value):
+    padding = " " * max(0, MENU_WIDTH - display_width(value))
+    print(f"  {BLUE}║{value}{padding}{BLUE}║{NC}")
+
+
+def menu_frame(title, sections, details=()):
+    print(f"\n{BLUE}  ╔{'═' * MENU_WIDTH}╗{NC}")
+    menu_row(f"    {BLUE}{title}{NC}")
+    for label, value in details:
+        menu_row(f"    {BLUE}{label}：{GREEN}{value}{NC}")
+    print(f"{BLUE}  ╠{'═' * MENU_WIDTH}╣{NC}")
+    for index, (heading, options) in enumerate(sections):
+        if index:
+            menu_row("")
+        if heading:
+            menu_row(f"  {BLUE}{heading}{NC}")
+        for number, label in options:
+            menu_row(f"  {GREEN}[{number}]{BLUE}  {label}{NC}")
+    menu_row("")
+    menu_row(f"  {GREEN}[0]{BLUE}  返回{NC}")
+    print(f"{BLUE}  ╚{'═' * MENU_WIDTH}╝{NC}\n")
+
+
+def result_field(label, value):
+    prefix = f"  {BLUE}{aligned(label, 8)}：{NC} "
+    indent = display_width(prefix)
+    width = max(1, shutil.get_terminal_size((80, 24)).columns - indent)
+    lines, current, count = [], "", 0
+    for char in str(value):
+        size = character_width(char)
+        if count + size > width and current:
+            lines.append(current)
+            current, count = "", 0
+        current += char
+        count += size
+    lines.append(current)
+    for index, line in enumerate(lines):
+        print(f"{prefix if index == 0 else ' ' * indent}{GREEN}{line}{NC}")
+
+
+def print_traffic_rows(rows, columns):
+    # 窄终端改用纵向明细，避免流量列折行后与域名错位
+    if columns < 64:
+        for target, up, down in rows:
+            result_field("域名/IP", target)
+            for label, value in (("上传", up), ("下载", down), ("合计", up + down)):
+                result_field(label, human(value))
+            print()
+        return
+    target_width = min(40, columns - 44)
+    headers = aligned("域名/IP", target_width) + "".join(aligned(label, 14) for label in ("上传", "下载", "合计"))
+    print(f"  {BLUE}{headers}{NC}")
+    for target, up, down in rows:
+        values = "".join(aligned(human(value), 14) for value in (up, down, up + down))
+        print(f"  {GREEN}{aligned(target, target_width)}{values}{NC}")
 
 
 def available_nodes(directory, db):
@@ -439,8 +521,13 @@ def query_data(directory, args):
     with closing(database(directory, True)) as db:
         nodes = available_nodes(directory, db)
         if args.command == "nodes":
-            for index, (_, name, protocol) in enumerate(nodes, 1):
-                print(f"  [{index}] {clean(name, 80)} ({'Vless' if protocol == 'vless-reality' else protocol})")
+            settings = read_json(Path(directory) / "settings.json")
+            ports = {node["tag"]: node.get("port") for node in read_json(settings["meta_file"])["nodes"]}
+            for index, (tag, name, protocol) in enumerate(nodes, 1):
+                protocol = "Vless" if protocol == "vless-reality" else clean(protocol)
+                port = ports.get(tag)
+                suffix = f" @ {BLUE}{clean(port)}{NC}" if port is not None else ""
+                print(f"  {GREEN}[{index}]{NC} {clean(name, 80)} ({protocol}){suffix}{NC}")
             return
         today = dt.date.today()
         starts = {"today": today, "yesterday": today - dt.timedelta(days=1),
@@ -478,21 +565,25 @@ def query_data(directory, args):
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         summary = db.execute("SELECT coalesce(sum(up),0),coalesce(sum(down),0),coalesce(sum(count),0) FROM " + table + where, params).fetchone()
         names = {"today": "今日", "yesterday": "昨日", "month": "本月", "30d": "最近 30 天", "all": "全部累计", "custom": "自定义日期"}
-        print("  统计范围：" + names[args.period] + (f"（{begin} 至 {end}）" if begin else ""))
+        message("信息", "=== 流量统计 ===")
+        print()
+        result_field("统计范围", names[args.period] + (f"（{begin} 至 {end}）" if begin else ""))
         started = int(meta_get(db, "started", "0"))
-        print("  开始记录：" + dt.datetime.fromtimestamp(started / 1000).strftime("%Y-%m-%d %H:%M:%S"))
-        print("  最近保存：" + (dt.datetime.fromtimestamp(int(meta_get(db, "last_flush", "0")) / 1000).strftime("%Y-%m-%d %H:%M:%S")))
-        print(f"  上传：{human(summary[0])}  下载：{human(summary[1])}  合计：{human(summary[0] + summary[1])}  连接：{summary[2]}\n")
-        print("  " + aligned("域名/IP", 40) + aligned("上传", 14) + aligned("下载", 14) + "合计")
+        result_field("开始记录", dt.datetime.fromtimestamp(started / 1000).strftime("%Y-%m-%d %H:%M:%S"))
+        result_field("最近保存", dt.datetime.fromtimestamp(int(meta_get(db, "last_flush", "0")) / 1000).strftime("%Y-%m-%d %H:%M:%S"))
+        for label, value in (("上传", human(summary[0])), ("下载", human(summary[1])),
+                             ("合计", human(summary[0] + summary[1])), ("连接", str(summary[2]))):
+            result_field(label, value)
+        print()
         rows = db.execute("SELECT target,sum(up),sum(down) FROM " + table + where +
                           " GROUP BY target ORDER BY sum(up)+sum(down) DESC,target LIMIT ?", params + [args.limit]).fetchall()
-        for target, up, down in rows:
-            print("  " + aligned(target, 40) + aligned(human(up), 14) + aligned(human(down), 14) + human(up + down))
+        print_traffic_rows(rows, shutil.get_terminal_size((80, 24)).columns)
         if not rows:
-            print("  暂无统计记录")
-        print("\n  按域名/IP 汇总，最多显示 " + str(args.limit) + " 项")
+            message("信息", "暂无统计记录")
+        print()
+        message("信息", "按域名/IP 汇总，最多显示 " + str(args.limit) + " 项")
         if int(meta_get(db, "interruptions", "0")):
-            print("  [信息] 采集曾中断，记录可能存在缺口")
+            message("信息", "采集曾中断，记录可能存在缺口")
 
 
 def api_service(settings):
@@ -554,7 +645,7 @@ class EndOfInput(Exception):
 
 def prompt(question):
     try:
-        result = input("  " + question).strip()
+        result = input("  " + NC + question).strip()
     except EOFError:
         raise EndOfInput()
     if result.lower() == "q":
@@ -562,9 +653,9 @@ def prompt(question):
     return result
 
 
-def message(kind, value):
-    colors = {"信息": "\033[0;36m", "成功": "\033[0;32m", "错误": "\033[0;31m", "注意": "\033[0;33m"}
-    print("  " + colors[kind] + "[" + kind + "] " + clean(value, 240) + "\033[0m", flush=True)
+def message(kind, value, file=None):
+    colors = {"信息": CYAN, "成功": GREEN, "错误": RED, "注意": YELLOW}
+    print("  " + colors[kind] + "[" + kind + "] " + clean(value, 240) + NC, file=file, flush=True)
 
 
 class Management:
@@ -833,8 +924,9 @@ class Management:
 
     def query_menu(self):
         self.settings()
-        message("信息", "查询流量统计")
-        print("\n  [1] 今日\n  [2] 昨日\n  [3] 本月\n  [4] 最近 30 天\n  [5] 全部累计\n  [6] 自定义日期\n  [0] 返回")
+        clear_terminal()
+        menu_frame("流量统计查询", [("统计范围", [(1, "今日"), (2, "昨日"), (3, "本月"),
+                   (4, "最近 30 天"), (5, "全部累计"), (6, "自定义日期")])])
         choice = prompt("请选择统计范围 (默认 1): ") or "1"
         if choice == "0":
             raise Cancelled()
@@ -857,14 +949,15 @@ class Management:
 
     def menu(self):
         while True:
-            if sys.stdout.isatty():
-                print("\033[3J\033[2J\033[H\033[0m", end="")
-            print()
-            message("信息", "流量统计")
-            print("  采集状态：" + ("运行中" if self.pid() else "已停止" if self.settings_path.exists() else "未开启"))
-            print("\n  [1] 查看统计\n  [2] 开启统计\n  [3] 停止统计\n  [4] 清空统计\n  [5] 卸载统计\n  [0] 返回")
+            clear_terminal()
+            state = "运行中" if self.pid() else "已停止" if self.settings_path.exists() else "未开启"
+            menu_frame("sing-box 流量统计", [
+                ("查询统计", [(1, "查看统计")]),
+                ("采集管理", [(2, "开启统计"), (3, "停止统计")]),
+                ("数据维护", [(4, "清空统计"), (5, "卸载统计")])],
+                [("采集状态", state), ("管理脚本版本", "v" + STATS_VERSION)])
             try:
-                choice = prompt("请选择选项 [0-5]: ")
+                choice = prompt("请输入选项 [0-5]: ")
                 if choice == "0":
                     return
                 if choice == "1":
@@ -889,7 +982,6 @@ class Management:
                     self.remove()
                 else:
                     message("错误", "无效选项")
-                    continue
                 prompt("按回车返回流量统计菜单...")
             except Cancelled:
                 continue
@@ -953,5 +1045,5 @@ if __name__ == "__main__":
     except (Cancelled, EndOfInput, KeyboardInterrupt):
         sys.exit(0)
     except (OSError, ValueError, sqlite3.Error, http.client.HTTPException, TypeError, KeyError, subprocess.SubprocessError) as error:
-        print("  [错误] " + clean(error, 180), file=sys.stderr)
+        message("错误", clean(error, 180), file=sys.stderr)
         sys.exit(1)
