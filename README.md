@@ -1,8 +1,8 @@
 # singbox
 
-Linux sing-box 节点管理脚本，提供节点管理、服务控制、核心更新和卸载功能
+Linux sing-box 节点管理脚本，提供节点管理、本地流量统计、服务控制、核心更新和卸载功能
 
-管理脚本版本：`1.3.3`
+管理脚本版本：`1.3.5`
 
 ## 功能与协议
 
@@ -14,6 +14,7 @@ Linux sing-box 节点管理脚本，提供节点管理、服务控制、核心�
 - UUID、Reality 密钥、Short ID、密码和 TLS 自签名证书生成
 - systemd / OpenRC / direct 服务管理
 - 配置校验、事务备份和失败回滚
+- 按节点、域名/IP 和日期查询流量记录，SQLite 本地存储
 
 | 协议 | 默认监听端口 | 默认节点名称 |
 | --- | --- | --- |
@@ -52,7 +53,7 @@ TLS 节点不使用 ACME 申请证书。服务器防火墙及 NAT 映射应与�
 (curl -LfsS https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh -o /usr/local/bin/s || wget -q https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh -O /usr/local/bin/s) && chmod +x /usr/local/bin/s && s
 ```
 
-管理命令为 `s`。安装管理脚本不会自动安装 sing-box 核心。已有核心由脚本探测；未安装时，使用菜单 `[9]` 或 `s --update` 安装
+管理命令为 `s`。安装管理脚本不会自动安装 sing-box 核心。已有核心由脚本探测；未安装时，使用菜单 `[10]` 或 `s --update` 安装
 
 ## 管理菜单
 
@@ -63,15 +64,28 @@ TLS 节点不使用 ACME 申请证书。服务器防火墙及 NAT 映射应与�
 | 3 | 修改节点 |
 | 4 | 删除节点 |
 | 5 | 清空所有节点 |
-| 6 | 启动 sing-box |
-| 7 | 停止 sing-box |
-| 8 | 重启 sing-box |
-| 9 | 安装/更新核心 |
-| 10 | 更新管理脚本 |
-| 11 | 一键卸载 |
+| 6 | 流量统计 |
+| 7 | 启动 sing-box |
+| 8 | 停止 sing-box |
+| 9 | 重启 sing-box |
+| 10 | 安装/更新核心 |
+| 11 | 更新管理脚本 |
+| 12 | 一键卸载 |
 | 0 | 退出脚本 |
 
 核心更新完成后按回车返回菜单；管理脚本更新完成后按回车加载脚本。交互输入支持 `q` / `Q` 取消，删除和卸载确认支持 `Y` / `N`
+
+## 本地流量统计
+
+菜单 `[6]` 提供查询、开启、停止、清空和卸载操作。统计组件独立维护于 `stats.py`，首次进入时安装至管理目录；需要包含 SQLite 支持的 Python 3.9 或更新版本，不使用第三方 Python 包。统计默认关闭，开启时要求 sing-box 1.14.0 或更新版本，并应用配置及重启托管服务
+
+采集使用带随机密钥的内核 API，仅绑定 `127.0.0.1`，默认端口 `9090`，冲突时可另选端口。Web 面板关闭，不提供公网统计入口。systemd/OpenRC 下由独立服务管理采集进程，direct 模式随管理脚本启动恢复采集
+
+记录上传、下载字节数和连接次数，支持按节点、域名/IP、今日、昨日、本月、最近 30 天或自定义日期查询。每日记录保留 365 天，总累计保留至清空或卸载。节点改名沿用原有统计，已删除节点的历史记录仍可查询
+
+域名通过 HTTP、TLS、QUIC 嗅探获取，无法识别时按目标 IP 记录，不记录 HTTPS 完整 URL、页面内容或系统其他程序的流量。统计为代理有效载荷计数，不等同于网卡或运营商计费流量；采集停止、核心重启或异常断连可能产生记录缺口，开启前的流量无法追溯
+
+停止统计保留历史数据并撤销本组件的 API 和嗅探配置，卸载统计删除其服务、数据库和设置。主脚本一键卸载同时清理统计组件
 
 ## 文件路径
 
@@ -83,6 +97,11 @@ TLS 节点不使用 ACME 申请证书。服务器防火墙及 NAT 映射应与�
 | `/usr/local/bin/sing-box` | 托管核心 |
 | `/usr/local/etc/sing-box/config.json` | 核心配置及自动生成的 TLS 证书、私钥 |
 | `/usr/local/etc/sing-box/nodes.json` | 节点元数据 |
+| `/usr/local/etc/sing-box/stats.py` | 独立统计组件 |
+| `/usr/local/etc/sing-box/stats/` | 统计设置与 SQLite 数据库 |
+| `/etc/systemd/system/singbox-stats.service` | systemd 统计服务 |
+| `/etc/init.d/singbox-stats` | OpenRC 统计服务 |
+| `/var/log/singbox-stats.log` | OpenRC/direct 统计日志 |
 | `/etc/systemd/system/sing-box.service` | systemd 服务 |
 | `/etc/init.d/sing-box` | OpenRC 服务 |
 | `/run/sing-box/sing-box.pid` | direct 进程记录 |
@@ -98,6 +117,9 @@ s --update        # 安装或更新 sing-box 核心
 s --update-script # 更新管理脚本
 s --version       # 显示管理脚本版本
 s --uninstall     # 卸载托管服务、节点和管理脚本
+s --stats today   # 今日全部节点流量
+s --stats all --node 1 --target example.com
+s --stats custom --start 2026-11-01 --end 2026-11-02
 ```
 
 ## 卸载与维护

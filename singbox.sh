@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.3.3"
+SCRIPT_VERSION="1.3.5"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -33,6 +33,14 @@ DEFAULT_ANYTLS_PORT=443
 DEFAULT_SNI="www.bing.com"
 SS2022_METHOD="2022-blake3-aes-128-gcm"
 INIT_SYSTEM="direct"
+STATS_MODULE="$SINGBOX_DIR/stats.py"
+STATS_DIR="$SINGBOX_DIR/stats"
+STATS_MARKER="$SINGBOX_DIR/.stats-module"
+STATS_SHA256="4a66bcfffa98e5bf7ee1f34eab4bc6ef4c018c444304c400f22b49919222601e"
+STATS_BLOB="d85d315fa166dc90b406a376e731f7347481f8c7"
+STATS_SYSTEMD_UNIT="${STATS_SYSTEMD_UNIT:-/etc/systemd/system/singbox-stats.service}"
+STATS_OPENRC_UNIT="${STATS_OPENRC_UNIT:-/etc/init.d/singbox-stats}"
+STATS_LOG_FILE="${STATS_LOG_FILE:-/var/log/singbox-stats.log}"
 
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
@@ -112,8 +120,10 @@ cleanup_stale_temp_files() {
 
 maintenance_cleanup() {
     [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$LOG_FILE"
+    [[ $INIT_SYSTEM == systemd ]] || rotate_file_log "$STATS_LOG_FILE"
     cleanup_stale_temp_files "$SINGBOX_DIR" \
-        '.transaction.*' '.core.*' '.config.*' '.meta.*' '.script.*'
+        '.transaction.*' '.core.*' '.config.*' '.meta.*' '.script.*' \
+        '.stats-config.*' '.stats-meta.*' '.stats-download.*'
 }
 
 # === 管理脚本锁与交互输入 ===
@@ -623,7 +633,7 @@ check_config() {
     local mode="${1:-verbose}" file="${2:-$CONFIG_FILE}"
     resolve_core > /dev/null 2>&1 || true
     [[ -x "$SINGBOX_BIN" ]] || {
-        warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'
+        warn 'sing-box 核心未安装，请先执行菜单 [10] 或 s --update'
         return 1
     }
     [[ "$mode" == quiet ]] || info '正在检查 config.json'
@@ -643,6 +653,7 @@ apply_transaction() {
     # 同时备份配置、元数据和服务单元，以便失败后恢复一致状态
     local new_config="$1" new_meta="$2" count="$3" backup active=0 enabled=0 rollback_ok=1 unit_path unit_exists=0 service_changed=0
     # 先校验候选配置，避免将无效证书或协议字段写入正在运行的配置
+    stats_prepare_candidate "$new_config" "$new_meta" || return 1
     check_config quiet "$new_config" || return 1
     backup=$(mktemp -d "$SINGBOX_DIR/.recovery.XXXXXX") || {
         fail '无法创建事务备份'
@@ -852,7 +863,7 @@ update_core() {
 require_core() {
     resolve_core > /dev/null 2>&1 || true
     [[ -x "$SINGBOX_BIN" ]] || {
-        warn 'sing-box 核心未安装，请先执行菜单 [9] 或 s --update'
+        warn 'sing-box 核心未安装，请先执行菜单 [10] 或 s --update'
         return 1
     }
 }
@@ -866,7 +877,7 @@ require_tls_core() {
         ((BASH_REMATCH[1] > 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] >= 12))); then
         return 0
     fi
-    fail 'Hysteria2 和 AnyTLS 需要 sing-box 1.12.0 或更新版本，请先执行菜单 [9]'
+    fail 'Hysteria2 和 AnyTLS 需要 sing-box 1.12.0 或更新版本，请先执行菜单 [10]'
 }
 
 valid_password() {
@@ -2001,6 +2012,13 @@ uninstall() {
     read_input answer '  确认卸载 sing-box、全部节点和管理脚本？(Y/N): ' || return 1
     [[ "$answer" == [yY] ]] || return 1
     check_uninstall_services || return 1
+    if [[ -e "$STATS_DIR" || -L "$STATS_DIR" || -e "$STATS_MARKER" ]]; then
+        stats_python_ready && stats_load_module && stats_run remove-all || {
+            fail '统计组件清理失败，未继续卸载 sing-box'
+            return 1
+        }
+        remove_uninstall_paths -f "$STATS_MODULE" "$STATS_MARKER" || return 1
+    fi
     if ! svc_stop; then
         fail 'sing-box 停止失败，未执行卸载'
         return 1
@@ -2027,6 +2045,8 @@ uninstall() {
     remove_uninstall_paths -rf "$SINGBOX_DIR"/.transaction.?????? "$SINGBOX_DIR"/.core.?????? \
         "$SINGBOX_DIR"/.config.?????? "$SINGBOX_DIR"/.meta.?????? "$SINGBOX_DIR"/.script.?????? \
         "$SINGBOX_DIR"/.recovery.?????? || return 1
+    remove_uninstall_paths -f "$SINGBOX_DIR"/.stats-config.???????? "$SINGBOX_DIR"/.stats-meta.???????? \
+        "$SINGBOX_DIR"/.stats-download.?????? "$SINGBOX_DIR"/.stats-download.??????.json || return 1
     # 目录内未知文件不属于清理清单，保留并明确提示
     if [[ -d "$SINGBOX_DIR" ]]; then
         leftover=$(find "$SINGBOX_DIR" -mindepth 1 -maxdepth 1 -print -quit) || {
@@ -2044,6 +2064,97 @@ uninstall() {
     rmdir "$(dirname "$PID_FILE")" > /dev/null 2>&1 || true
     remove_uninstall_paths -f "${SCRIPT_TARGET:-/usr/local/bin/s}" || return 1
     success 'sing-box 及其相关文件已卸载'
+}
+
+# === 本地统计模块接口 ===
+# 采集、数据库、查询和统计服务均由 stats.py 管理，主脚本只负责版本校验与调用
+stats_python_ready() {
+    command -v python3 > /dev/null 2>&1 && python3 -c 'import sys, sqlite3, http.client; assert sys.version_info >= (3, 9)' > /dev/null 2>&1
+}
+
+stats_install_python() {
+    stats_python_ready && return 0
+    info '正在安装流量统计依赖 Python 3'
+    if command -v apt-get > /dev/null 2>&1; then
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3
+    elif command -v apk > /dev/null 2>&1; then
+        apk add --no-cache python3
+    elif command -v dnf > /dev/null 2>&1; then
+        dnf install -y python3
+    elif command -v yum > /dev/null 2>&1; then
+        yum install -y python3
+    fi
+    stats_python_ready || { fail '需要包含 SQLite 支持的 Python 3.9 或更新版本'; return 1; }
+}
+
+stats_module_valid() {
+    [[ -f "$STATS_MODULE" && ! -L "$STATS_MODULE" ]] || return 1
+    local digest
+    digest=$(sha256sum "$STATS_MODULE") || return 1
+    [[ ${digest%% *} == "$STATS_SHA256" ]]
+}
+
+stats_load_module() (
+    local source_file temp digest
+    if [[ -e "$STATS_MODULE" || -L "$STATS_MODULE" ]]; then
+        [[ -f "$STATS_MARKER" && ! -L "$STATS_MARKER" && $(cat "$STATS_MARKER") == singbox-local-stats-v1 ]] || {
+            fail '无法确认统计模块归属，未覆盖文件'
+            exit 1
+        }
+        stats_module_valid && exit 0
+    fi
+    [[ ! -L "$STATS_MARKER" && ! -L "$STATS_MODULE" ]] || { fail '统计模块不能是符号链接'; exit 1; }
+    temp=$(mktemp "$SINGBOX_DIR/.stats-download.XXXXXX") || exit 1
+    trap 'rm -f -- "$temp" "$temp.json"' EXIT
+    source_file="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/stats.py"
+    if [[ -f "$source_file" ]] && digest=$(sha256sum "$source_file") && [[ ${digest%% *} == "$STATS_SHA256" ]]; then
+        cp "$source_file" "$temp" || exit 1
+    else
+        get_url 'https://raw.githubusercontent.com/haoch1/singbox/main/stats.py' "$temp" || true
+        digest=$(sha256sum "$temp") || exit 1
+        if [[ ${digest%% *} != "$STATS_SHA256" ]]; then
+            # main 已更新时，旧版管理脚本仍可获取与自身匹配的不可变模块
+            get_url "https://api.github.com/repos/haoch1/singbox/git/blobs/$STATS_BLOB" "$temp.json" &&
+                jq -er '.content' "$temp.json" | base64 -d > "$temp" || { fail '统计模块下载失败'; exit 1; }
+        fi
+    fi
+    digest=$(sha256sum "$temp") || exit 1
+    [[ ${digest%% *} == "$STATS_SHA256" ]] || { fail '统计模块校验失败'; exit 1; }
+    python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$temp" || { fail '统计模块语法检查失败'; exit 1; }
+    chmod 600 "$temp" && mv -f "$temp" "$STATS_MODULE" && printf '%s\n' singbox-local-stats-v1 > "$STATS_MARKER"
+)
+
+stats_run() {
+    local command=$1 context script_path
+    shift
+    script_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+    context=$(jq -cn --arg SINGBOX_DIR "$SINGBOX_DIR" --arg CONFIG_FILE "$CONFIG_FILE" \
+        --arg META_FILE "$META_FILE" --arg SINGBOX_BIN "$SINGBOX_BIN" --arg PID_FILE "$PID_FILE" \
+        --arg LOG_FILE "$LOG_FILE" --arg SYSTEMD_UNIT "$SYSTEMD_UNIT" --arg OPENRC_UNIT "$OPENRC_UNIT" \
+        --arg SYSTEMD_STARTUP "$SYSTEMD_STARTUP" --arg OPENRC_STARTUP "$OPENRC_STARTUP" \
+        --arg INIT_SYSTEM "$INIT_SYSTEM" --arg SCRIPT_PATH "$script_path" \
+        --arg STATS_SYSTEMD_UNIT "$STATS_SYSTEMD_UNIT" --arg STATS_OPENRC_UNIT "$STATS_OPENRC_UNIT" \
+        --arg STATS_LOG_FILE "$STATS_LOG_FILE" '$ARGS.named') || return 1
+    SINGBOX_STATS_CONTEXT="$context" python3 "$STATS_MODULE" "$command" "$STATS_DIR" "$@" 9>&-
+}
+
+stats_prepare_candidate() {
+    [[ ${SINGBOX_STATS_TRANSACTION:-0} != 1 ]] || return 0
+    [[ -f "$STATS_DIR/settings.json" ]] || return 0
+    jq -e '.enabled == true' "$STATS_DIR/settings.json" > /dev/null 2>&1 || return 0
+    stats_python_ready && stats_module_valid || { fail '统计模块不可用，配置未变更'; return 1; }
+    stats_run prepare --config "$1" --metadata "$2"
+}
+
+stats_menu() {
+    stats_install_python && stats_load_module || return 1
+    # Ctrl+C 只结束统计子菜单；服务和采集子进程由模块显式关闭继承的描述符
+    trap ':' INT
+    stats_run menu
+    local status=$?
+    trap interrupt_exit INT
+    MENU_CANCELLED=1
+    return "$status"
 }
 
 # === 菜单绘制与脚本入口 ===
@@ -2123,49 +2234,51 @@ menu() {
         menu_row "  ${GREEN}[3]${BLUE}  修改节点${NC}"
         menu_row "  ${GREEN}[4]${BLUE}  删除节点${NC}"
         menu_row "  ${GREEN}[5]${BLUE}  清空所有节点${NC}"
+        menu_row "  ${GREEN}[6]${BLUE}  流量统计${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${BLUE}服务管理${NC}"
-        menu_row "  ${GREEN}[6]${BLUE}  启动 sing-box${NC}"
-        menu_row "  ${GREEN}[7]${BLUE}  停止 sing-box${NC}"
-        menu_row "  ${GREEN}[8]${BLUE}  重启 sing-box${NC}"
+        menu_row "  ${GREEN}[7]${BLUE}  启动 sing-box${NC}"
+        menu_row "  ${GREEN}[8]${BLUE}  停止 sing-box${NC}"
+        menu_row "  ${GREEN}[9]${BLUE}  重启 sing-box${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${BLUE}更新与维护${NC}"
-        menu_row "  ${GREEN}[9]${BLUE}  安装/更新核心${NC}"
-        menu_row "  ${GREEN}[10]${BLUE} 更新管理脚本${NC}"
-        menu_row "  ${GREEN}[11]${BLUE} 一键卸载${NC}"
+        menu_row "  ${GREEN}[10]${BLUE} 安装/更新核心${NC}"
+        menu_row "  ${GREEN}[11]${BLUE} 更新管理脚本${NC}"
+        menu_row "  ${GREEN}[12]${BLUE} 一键卸载${NC}"
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
         printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
         local status=0
-        read -r -p '  请输入选项 [0-11]: ' choice || status=$?
+        read -r -p '  请输入选项 [0-12]: ' choice || status=$?
         ((status == 130)) && interrupt_exit
         ((status != 0)) && return 0
         case "$choice" in
             1) add_node ;; 2) view_nodes ;; 3) modify_node ;; 4) delete_node ;; 5) clear_nodes ;;
-            6)
+            6) stats_menu ;;
+            7)
                 printf '\n'
                 info '启动 sing-box'
                 start_service
                 ;;
-            7)
+            8)
                 printf '\n'
                 info '停止 sing-box'
                 stop_service
                 ;;
-            8)
+            9)
                 printf '\n'
                 info '重启 sing-box'
                 restart_service
                 ;;
-            9) update_core ;;
-            10)
+            10) update_core ;;
+            11)
                 if update_management_script; then
                     pause_enter '  按回车加载最新脚本...'
                     ((INPUT_EOF)) && return 0
                     exec bash "${SCRIPT_TARGET:-$0}"
                 fi
                 ;;
-            11) uninstall && return 0 ;; 0) return 0 ;;
+            12) uninstall && return 0 ;; 0) return 0 ;;
             *) fail '无效选项' ;;
         esac
         ((MENU_CANCELLED)) || pause_enter
@@ -2180,6 +2293,12 @@ main() {
     }
     detect_init
     ensure_dependencies || return 1
+    if [[ "${1:-}" == --stats ]]; then
+        stats_python_ready && stats_module_valid || { fail '流量统计尚未安装或模块版本不匹配，请先执行菜单 [6]'; return 1; }
+        shift
+        stats_run query "$@"
+        return $?
+    fi
     mkdir -p /run/lock || return 1
     mkdir -p "$SINGBOX_DIR" || return 1
     acquire_manager_lock || return 1
@@ -2192,6 +2311,9 @@ main() {
     init_state || return 1
     maintenance_cleanup
     resolve_core > /dev/null 2>&1 || true
+    if [[ -f "$STATS_DIR/settings.json" ]] && jq -e '.enabled == true' "$STATS_DIR/settings.json" > /dev/null 2>&1; then
+        stats_python_ready && stats_load_module && stats_run sync || warn '流量采集未启动，请执行菜单 [6] 检查'
+    fi
     SCRIPT_TARGET="${SCRIPT_TARGET:-/usr/local/bin/s}"
     case "${1:-}" in
         --version | -v)
@@ -2199,7 +2321,7 @@ main() {
             return 0
             ;;
         --help | -h)
-            printf '用法: s [--update|--update-script|--uninstall|--version]\n'
+            printf '用法: s [--update|--update-script|--uninstall|--version|--stats [today|yesterday|month|30d|all|custom] [--node 序号] [--target 域名] [--start YYYY-MM-DD --end YYYY-MM-DD]]\n'
             return 0
             ;;
         --update)
