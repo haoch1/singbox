@@ -2,7 +2,7 @@
 
 Linux sing-box 多协议节点管理脚本，提供节点管理、服务控制和核心更新
 
-管理脚本版本：`1.5.1`
+管理脚本版本：`1.3.9`
 
 ## 安装
 
@@ -33,27 +33,6 @@ Hysteria2、AnyTLS 的默认 SNI 取创建时的服务器地址，每个节点�
 
 生成 `vless://`、`ss://`、`anytls://`、`hysteria2://` 单节点分享链接，支持 IPv6 地址格式化和参数 URI 编码
 
-### Hysteria2 端口跳跃
-
-端口跳跃按节点设置，默认关闭。开启后，核心继续监听节点原有的 UDP 端口，脚本通过 `nftables` 将所选 UDP 范围转发到该端口。只修改跳跃设置时无需重启核心，现有单端口链接仍可使用
-
-通过 `[1] 添加节点` 选择 Hysteria2，输入 `Y` 开启跳跃后，端口范围和间隔均可回车采用默认值。默认范围从 `20000-20009` 开始，遇到已有节点、监听端口或跳跃范围时顺延至下一组可用端口。默认间隔为 `30` 秒。已有节点可通过 `[3] 修改节点` → `[5] 端口跳跃` 配置，输入 `0` 关闭
-
-启用端口跳跃需要 `nftables`。脚本独立加载其规则，systemd 启动核心时自动恢复，OpenRC/direct 通过本脚本启动或重启时恢复。若通过全量重载防火墙清空了规则，可在防火墙配置中引用 `/usr/local/etc/sing-box/hy2-hopping*.nft`，或通过管理菜单重启核心恢复规则
-
-云防火墙或上游 NAT 需放行跳跃范围的 UDP 流量。原监听端口需继续放行，供单端口客户端使用
-
-`[2] 查看节点` 单独显示跳跃参数，客户端按下表设置，密码、证书和混淆参数沿用原节点
-
-| 客户端 | 端口范围 | 切换间隔 |
-| --- | --- | --- |
-| sing-box | `server_ports: ["20000:20009"]` | `hop_interval: "30s"` |
-| Mihomo | `ports: "20000-20009"` | `hop-interval: 30` |
-
-sing-box 客户端设置 `server_ports` 时可移除原有的 `server_port`。普通客户端继续使用单端口链接
-
-跳跃范围不能与其他 UDP 入站、监听端口、已有跳跃范围或转发规则重叠。遇到无法安全判断的外部 NAT 规则时，脚本会拒绝启用。关闭跳跃或删除节点会移除对应的转发规则，最后一组跳跃规则移除后，清理规则文件和 systemd 恢复配置。`inet singbox_hy2` 表由脚本专用
-
 ## 管理菜单
 
 | 编号 | 操作 |
@@ -73,8 +52,6 @@ sing-box 客户端设置 `server_ports` 时可移除原有的 `server_port`。�
 
 支持 systemd、OpenRC 和 direct 服务管理，配置变更经过校验与事务备份，应用失败时回滚。启动和重启在 systemd/OpenRC 下启用开机自启，停止时关闭自启
 
-删除节点时清理其入站配置、元数据和内嵌凭据，包括 Hysteria2、AnyTLS 的证书和私钥
-
 核心与管理脚本独立更新。菜单更新完成后按回车返回或加载最新脚本；交互输入支持 `q` / `Q` 取消，删除和卸载使用 `Y` / `N` 确认
 
 仓库保留独立文件 `stats.py`，当前管理脚本不加载、安装或运行该文件
@@ -87,7 +64,6 @@ sing-box 客户端设置 `server_ports` 时可移除原有的 `server_port`。�
 | `/usr/local/bin/sing-box` | 托管核心 |
 | `/usr/local/etc/sing-box/config.json` | 核心配置及 TLS 证书、私钥 |
 | `/usr/local/etc/sing-box/nodes.json` | 节点元数据 |
-| `/usr/local/etc/sing-box/hy2-hopping.nft` | 启用 Hy2 端口跳跃时生成的 nftables 规则 |
 | `/etc/systemd/system/sing-box.service` | systemd 核心服务 |
 | `/etc/init.d/sing-box` | OpenRC 核心服务 |
 | `/var/log/sing-box.log` | OpenRC/direct 核心日志 |

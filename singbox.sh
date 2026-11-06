@@ -7,16 +7,13 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.5.1"
+SCRIPT_VERSION="1.3.9"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
 CORE_INSTALL_BIN="/usr/local/bin/sing-box"
 CONFIG_FILE="$SINGBOX_DIR/config.json"
 META_FILE="$SINGBOX_DIR/nodes.json"
-HY2_NFT_TABLE="singbox_hy2"
-HY2_NFT_MARKER='# singbox managed Hy2 port hopping v1'
-HY2_HOP_INTERVAL=30
 PID_FILE="${SINGBOX_PID_FILE:-/run/sing-box/sing-box.pid}"
 LOG_FILE="${SINGBOX_LOG_FILE:-/var/log/sing-box.log}"
 LOCK_FILE="${SINGBOX_LOCK_FILE:-/run/lock/singbox-manager.lock}"
@@ -530,11 +527,6 @@ node_fields() {
 port_conflict() {
     local port="$1" exclude="${2:-}" mode="${3:-tcp}"
     # 按监听传输检查冲突；TCP 与 UDP 可以使用同一个端口号
-    if [[ "$mode" != tcp ]] && jq -e --argjson p "$port" '
-        any(.nodes[]?; .hy2_hop != null and $p >= .hy2_hop.first and $p <= .hy2_hop.last)
-    ' "$META_FILE" > /dev/null 2>&1; then
-        return 0
-    fi
     jq -e --argjson p "$port" --arg e "$exclude" --arg mode "$mode" '
         .nodes[]? | select((.port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))
         | (.protocol // "vless-reality") as $protocol
@@ -627,289 +619,6 @@ build_node_link() {
     esac
 }
 
-# === Hysteria2 端口跳跃 ===
-hy2_hop_plan() {
-    # 规则由节点元数据派生；启用前也检查未纳入管理的核心入站
-    jq -nr --slurpfile config "$1" --slurpfile meta "$2" '
-        def port: type == "number" and . >= 1 and . <= 65535 and floor == .;
-        def udp:
-            .type == "hysteria2" or .type == "hysteria" or .type == "tuic"
-            or (.type != "vless" and .type != "anytls" and .network != "tcp");
-        ($config[0].inbounds // []) as $inbounds
-        | [$meta[0].nodes[] | select(.hy2_hop != null)
-            | . as $node | .hy2_hop as $hop
-            | if .protocol == "hysteria2" and (.port | port)
-                and ($hop.first | port) and ($hop.last | port) and $hop.first < $hop.last
-                and ($hop.interval | type == "number" and floor == . and . >= 5 and . <= 3600)
-                and ([$inbounds[] | select(.tag == $node.tag)] | length == 1
-                    and .[0].type == "hysteria2" and .[0].listen_port == $node.port)
-                and all($inbounds[] | select(udp);
-                    (.listen_port < $hop.first or .listen_port > $hop.last))
-              then [$hop.first, $hop.last, .port]
-              else error("invalid or conflicting Hysteria2 port range") end]
-        | sort_by(.[0])
-        | . as $ranges
-        | if any(range(1; length); . as $i | $ranges[$i][0] <= $ranges[$i-1][1])
-          then error("overlapping Hysteria2 port ranges") else .[] | @tsv end
-    ' || fail 'Hy2 端口跳跃配置无效，或与其他 UDP 入站冲突'
-}
-
-hy2_nft_fragment() {
-    local rows="$1" first last port
-    [[ -n "$rows" ]] || return 0
-    printf '%s\n' "$HY2_NFT_MARKER" "create table inet $HY2_NFT_TABLE" "table inet $HY2_NFT_TABLE {" \
-        $'\tchain prerouting {' $'\t\ttype nat hook prerouting priority -100; policy accept;'
-    while IFS=$'\t' read -r first last port; do
-        printf '\t\tiifname != "lo" fib daddr type local udp dport %s-%s redirect to :%s comment "singbox-hy2"\n' "$first" "$last" "$port"
-    done <<< "$rows"
-    printf '\t}\n}\n'
-}
-
-hy2_nft_normalize() {
-    # 不同 nft 版本会用数字或名称显示同一 hook 优先级及地址类型
-    sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/priority dstnat;/priority -100;/; s/fib daddr type 2 /fib daddr type local /'
-}
-
-hy2_nft_loader() {
-    local fragment="$1" config="${SINGBOX_NFT_CONFIG:-/etc/nftables.conf}" include
-    if [[ -z "${SINGBOX_NFT_CONFIG:-}" && ! -f "$config" && -f /etc/nftables.nft ]]; then
-        config=/etc/nftables.nft
-    fi
-    include="include \"${fragment%.nft}*.nft\""
-    # 已接入完整重载的服务器继续检查其配置。独立应用规则时不要求接入
-    if [[ ! -r "$config" ]] || ! awk -v include="$include" '
-        { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
-        /^flush ruleset;?$/ { flushed=1; included=0 }
-        $0 == include && flushed { included++ }
-        END { exit !(included == 1) }
-    ' "$config"; then
-        return 0
-    fi
-    printf '%s\n' "$config"
-}
-
-hy2_nft_boot_hook() (
-    local enabled="$1" dir="$SYSTEMD_UNIT.d" hook text temp had_hook=0
-    [[ "$INIT_SYSTEM" == systemd ]] || exit 0
-    hook="$dir/50-singbox-hy2.conf"
-    [[ "$enabled" == 1 || -e "$hook" || -L "$hook" ]] || exit 0
-    if [[ ! "$SINGBOX_DIR" =~ ^/[a-zA-Z0-9_./+-]+$ ]]; then
-        fail '配置目录路径无法用于 Hy2 开机恢复'
-        exit 1
-    fi
-    text=$(printf '%s\n' '# singbox managed Hy2 restore v1' '[Unit]' 'After=nftables.service' '[Service]' \
-        "ExecStartPre=-:/bin/sh -c 'test ! -f \"\$1\" || nft list table inet $HY2_NFT_TABLE >/dev/null 2>&1 || exec nft -f \"\$1\"' hy2-restore $SINGBOX_DIR/hy2-hopping.nft")
-    if [[ -e "$hook" || -L "$hook" ]]; then
-        [[ -f "$hook" && ! -L "$hook" && ! -L "$dir" && $(cat -- "$hook") == "$text" ]] || {
-            fail "无法确认 Hy2 开机恢复配置归属：$hook"
-            exit 1
-        }
-        had_hook=1
-    fi
-    [[ "$enabled" != "$had_hook" ]] || exit 0
-    if [[ "$enabled" == 1 ]]; then
-        [[ ! -L "$dir" && -f "$SYSTEMD_UNIT" ]] && check_uninstall_services || {
-            fail '未找到由脚本管理的 sing-box systemd 服务'
-            exit 1
-        }
-        [[ -d "$dir" ]] || mkdir -m 755 -- "$dir" || exit 1
-    fi
-    temp=$(mktemp "$dir/.hy2-hook.XXXXXX") || exit 1
-    trap 'rm -f -- "$temp"' EXIT
-    if ((had_hook)); then
-        mv -f -- "$hook" "$temp" || exit 1
-    else
-        printf '%s\n' "$text" > "$temp" && chmod 644 "$temp" && mv -f -- "$temp" "$hook" || exit 1
-    fi
-    if ! systemctl daemon-reload > /dev/null 2>&1 9>&-; then
-        if ((had_hook)); then
-            if ! mv -f -- "$temp" "$hook"; then
-                trap - EXIT
-                fail "Hy2 开机恢复配置的备份保留在 $temp"
-                exit 1
-            fi
-        else
-            rm -f -- "$hook" || exit 1
-        fi
-        fail '重新加载 systemd 配置失败'
-        exit 1
-    fi
-    if ((had_hook)); then
-        rm -f -- "$temp" || exit 1
-        rmdir -- "$dir" 2> /dev/null || true
-    fi
-)
-
-hy2_nft_check_conflicts() {
-    local rows="$1" ruleset="$2" sockets first last port legacy
-    sockets=$(ss -H -lun) || { fail '无法检查 UDP 监听端口'; return 1; }
-    for legacy in /proc/net/ip_tables_names /proc/net/ip6_tables_names; do
-        if [[ -r "$legacy" ]] && grep -qx nat "$legacy"; then
-            fail '检测到旧版 iptables NAT，无法安全检查转发冲突'
-            return 1
-        fi
-    done
-    while IFS=$'\t' read -r first last port; do
-        if awk -v a="$first" -v b="$last" '
-            { p=$4; sub(/^.*:/, "", p); if (p ~ /^[0-9]+$/ && p >= a && p <= b) found=1 }
-            END { exit !found }
-        ' <<< "$sockets"; then
-            fail "UDP 范围 $first-$last 内已有监听端口"
-            return 1
-        fi
-        # 对无法判断范围的外部 NAT 或 TProxy 规则保守报冲突
-        jq -e --arg t "$HY2_NFT_TABLE" --argjson a "$first" --argjson b "$last" '
-            def overlaps:
-                if type == "number" then . >= $a and . <= $b
-                elif type == "object" and has("range") and all(.range[]; type == "number")
-                    then .range[0] <= $b and .range[1] >= $a
-                elif type == "object" and has("set") then any(.set[]; overlaps)
-                else true end;
-            any(.nftables[] | .rule // empty | select(.family != "inet" or .table != $t);
-                any(.expr[]; has("dnat") or has("redirect") or has("tproxy")
-                    or (.xt.type == "target" and (.xt.name == "DNAT" or .xt.name == "REDIRECT" or .xt.name == "TPROXY")))
-                and (any(.expr[] | .match // empty;
-                    .left.payload.protocol == "tcp"
-                    or (.op == "==" and .left.meta.key == "l4proto" and (.right == "tcp" or .right == 6))
-                    or ((.op == "==" or .op == "in") and .left.payload.protocol == "udp"
-                        and .left.payload.field == "dport" and (.right | overlaps | not))) | not))
-            | not
-        ' <<< "$ruleset" > /dev/null || {
-            fail "UDP 范围 $first-$last 与外部 nftables 转发冲突，或无法确认无冲突"
-            return 1
-        }
-    done <<< "$rows"
-}
-
-hy2_nft_sync() (
-    local rows="$1" old_rows="${2:-}" fragment="$SINGBOX_DIR/hy2-hopping.nft"
-    local previous='' previous_rows='' desired='' ruleset live='' handle expected='' loader='' temp
-    local had_hook=0 want_hook=0 hook="$SYSTEMD_UNIT.d/50-singbox-hy2.conf"
-    [[ -n "$rows" ]] && want_hook=1
-    [[ -e "$hook" || -L "$hook" ]] && had_hook=1
-    if [[ -z "$rows" && -z "$old_rows" && ! -e "$fragment" && ! -L "$fragment" ]]; then
-        hy2_nft_boot_hook 0
-        exit $?
-    fi
-    if [[ -e "$fragment" || -L "$fragment" ]]; then
-        [[ -f "$fragment" && ! -L "$fragment" ]] || { fail 'Hy2 规则文件归属不明'; exit 1; }
-        previous=$(cat -- "$fragment") || exit 1
-        previous_rows=$(sed -nE 's/^[[:space:]]*iifname != "lo" fib daddr type local udp dport ([0-9]{1,5})-([0-9]{1,5}) redirect to :([0-9]{1,5}) comment "singbox-hy2"$/\1\t\2\t\3/p' "$fragment")
-        [[ -n "$previous_rows" && "$previous" == "$(hy2_nft_fragment "$previous_rows")" ]] || {
-            fail 'Hy2 规则文件与脚本生成的格式不符，未覆盖'
-            exit 1
-        }
-    fi
-    ruleset=$(nft -j list ruleset) || { fail '需要 nftables 和访问防火墙的权限'; exit 1; }
-    handle=$(jq -r --arg t "$HY2_NFT_TABLE" '
-        .nftables[] | .table // empty | select(.family == "inet" and .name == $t) | .handle
-    ' <<< "$ruleset") || exit 1
-    if [[ -n "$handle" ]]; then
-        [[ "$handle" =~ ^[0-9]+$ ]] || { fail '无法识别 Hy2 规则表句柄'; exit 1; }
-        live=$(nft -nn list table inet "$HY2_NFT_TABLE" | hy2_nft_normalize) || exit 1
-        # 持久文件缺失时，仍可用事务开始时的节点配置确认规则归属
-        expected=$(sed '1,2d' <<< "${previous:-$(hy2_nft_fragment "$old_rows")}" | hy2_nft_normalize)
-        [[ -n "$expected" && "$live" == "$expected" ]] || {
-            fail "nftables 表 $HY2_NFT_TABLE 包含未确认归属的内容，未修改"
-            exit 1
-        }
-    fi
-    desired=$(hy2_nft_fragment "$rows") || exit 1
-    expected=$(sed '1,2d' <<< "$desired" | hy2_nft_normalize)
-    if [[ "$live" == "$expected" && "$previous" == "$desired" ]]; then
-        hy2_nft_boot_hook "$want_hook"
-        exit $?
-    fi
-    if [[ -n "$rows" ]]; then
-        loader=$(hy2_nft_loader "$fragment") && hy2_nft_check_conflicts "$rows" "$ruleset" || exit 1
-    fi
-    temp=$(mktemp -d "$SINGBOX_DIR/.recovery.XXXXXX") || exit 1
-    trap 'rm -f -- "$temp/batch" "$temp/next" "$temp/previous"; rmdir -- "$temp"' EXIT
-    {
-        [[ -z "$handle" ]] || printf 'delete table inet handle %s\n' "$handle"
-        [[ -z "$desired" ]] || printf '%s\n' "$desired"
-    } > "$temp/batch" || exit 1
-    nft -c -f "$temp/batch" || { fail 'Hy2 转发规则校验失败'; exit 1; }
-    [[ -z "$previous" ]] || cp -p -- "$fragment" "$temp/previous" || exit 1
-    if [[ -n "$desired" ]]; then
-        printf '%s\n' "$desired" > "$temp/next" && mv -f -- "$temp/next" "$fragment" || exit 1
-    else
-        rm -f -- "$fragment" || exit 1
-    fi
-    if { [[ -n "$loader" ]] && ! nft -c -f "$loader"; } \
-        || ! hy2_nft_boot_hook "$want_hook" || ! nft -f "$temp/batch"; then
-        if [[ -n "$previous" ]]; then
-            if ! mv -f -- "$temp/previous" "$fragment"; then
-                trap - EXIT
-                fail "规则文件恢复失败，备份保留在 $temp/previous"
-                exit 1
-            fi
-        else
-            rm -f -- "$fragment" || { fail "规则文件恢复失败，请检查 $fragment"; exit 1; }
-        fi
-        hy2_nft_boot_hook "$had_hook" || warn 'Hy2 开机恢复配置回滚失败'
-        fail 'Hy2 转发规则应用失败，已恢复原规则文件'
-        exit 1
-    fi
-)
-
-hy2_default_hop_range() {
-    local port="$1" reserved sockets
-    reserved=$(jq -nr --argjson port "$port" --slurpfile config "$CONFIG_FILE" --slurpfile meta "$META_FILE" '
-        [[$port,$port]]
-        + [$config[0].inbounds[] | .listen_port | numbers | [.,.]]
-        + [$meta[0].nodes[] | .hy2_hop // empty | [.first,.last]]
-        | .[] | @tsv
-    ') || return 1
-    sockets=$(ss -H -lun) || return 1
-    awk '
-        NR == FNR { if (NF == 2) { first[FNR]=$1; last[FNR]=$2 }; next }
-        { p=$4; sub(/^.*:/, "", p); if (p ~ /^[0-9]+$/) { first[NR]=p; last[NR]=p } }
-        END {
-            for (a=20000; a<21000; a+=10) {
-                b=a+9; available=1
-                for (i in first) if (first[i] <= b && last[i] >= a) { available=0; break }
-                if (available) { printf "%d-%d\n", a, b; exit }
-            }
-            exit 1
-        }
-    ' <(printf '%s\n' "$reserved") <(printf '%s\n' "$sockets")
-}
-
-read_hy2_hop_values() {
-    # 将验证后的范围和间隔写回添加或编辑动作的局部变量
-    local range="$1" default_interval="$2" value
-    if [[ ! "$range" =~ ^([0-9]{1,5})-([0-9]{1,5})$ ]]; then
-        fail '请输入连续 UDP 端口范围，例如 20000-20009'
-        return 1
-    fi
-    first=$((10#${BASH_REMATCH[1]}))
-    last=$((10#${BASH_REMATCH[2]}))
-    if ((first < 1 || last > 65535 || first >= last)); then
-        fail '范围必须包含至少两个有效端口，且起始端口小于结束端口'
-        return 1
-    fi
-    read_input value "  跳跃间隔（秒，默认 $default_interval）: " || return 1
-    value=${value:-$default_interval}
-    if [[ ! "$value" =~ ^[0-9]{1,4}$ ]] || ((10#$value < 5 || 10#$value > 3600)); then
-        fail '跳跃间隔应为 5–3600 秒'
-        return 1
-    fi
-    interval=$((10#$value))
-}
-
-print_hy2_hop_config() {
-    local index="$1" settings first last interval
-    settings=$(jq -r --argjson i "$index" '
-        .nodes[$i].hy2_hop // empty | [.first, .last, .interval] | @tsv
-    ' "$META_FILE") || return 1
-    [[ -n "$settings" ]] || return 0
-    IFS=$'\t' read -r first last interval <<< "$settings"
-    printf '  端口跳跃：UDP %s-%s，每 %s 秒\n' "$first" "$last" "$interval"
-    printf '    sing-box：{"server_ports":["%s:%s"],"hop_interval":"%ss"}\n' "$first" "$last" "$interval"
-    printf '    Mihomo：\n      ports: "%s-%s"\n      hop-interval: %s\n' "$first" "$last" "$interval"
-}
-
 check_config() {
     local mode="${1:-verbose}" file="${2:-$CONFIG_FILE}"
     resolve_core > /dev/null 2>&1 || true
@@ -933,11 +642,8 @@ check_config() {
 apply_transaction() {
     # 同时备份配置、元数据和服务单元，以便失败后恢复一致状态
     local new_config="$1" new_meta="$2" count="$3" backup active=0 enabled=0 rollback_ok=1 unit_path unit_exists=0 service_changed=0
-    local old_hop_plan new_hop_plan
     # 先校验候选配置，避免将无效证书或协议字段写入正在运行的配置
     check_config quiet "$new_config" || return 1
-    old_hop_plan=$(hy2_hop_plan "$CONFIG_FILE" "$META_FILE") || return 1
-    new_hop_plan=$(hy2_hop_plan "$new_config" "$new_meta") || return 1
     backup=$(mktemp -d "$SINGBOX_DIR/.recovery.XXXXXX") || {
         fail '无法创建事务备份'
         return 1
@@ -1027,11 +733,6 @@ apply_transaction() {
             rollback_transaction
             return 1
         fi
-    fi
-    # 先确认新监听已生效，再切换转发。失败时 nft 批次保持原状，节点事务回滚
-    if [[ "$old_hop_plan" != "$new_hop_plan" ]] && ! hy2_nft_sync "$new_hop_plan" "$old_hop_plan"; then
-        rollback_transaction
-        return 1
     fi
     rm -rf "$backup"
     return 0
@@ -1345,7 +1046,6 @@ add_ss2022_node() {
 add_tls_node() {
     local protocol="$1" label default_port mode server port name password id tag
     local new_config new_meta current_count obfs_password=''
-    local hop_choice range default_range range_hint='需手动输入' first=0 last=0 interval=$HY2_HOP_INTERVAL
     require_tls_core || return 1
     if [[ "$protocol" == hysteria2 ]]; then
         label=Hysteria2
@@ -1384,21 +1084,6 @@ add_tls_node() {
         fail '节点名称不能为空、不能超过 80 字或包含控制字符'
         return 1
     }
-    if [[ "$protocol" == hysteria2 ]]; then
-        read_input hop_choice '  启用端口跳跃？[Y/N，默认 N]: ' || return 1
-        case "$hop_choice" in
-            [yY])
-                command -v nft > /dev/null || { fail '启用端口跳跃需要安装 nftables'; return 1; }
-                if default_range=$(hy2_default_hop_range "$port"); then
-                    range_hint="默认 $default_range"
-                fi
-                read_input range "  UDP 跳跃范围 ($range_hint): " || return 1
-                read_hy2_hop_values "${range:-$default_range}" "$HY2_HOP_INTERVAL" || return 1
-                ;;
-            [nN] | '') ;;
-            *) fail '请输入 Y 或 N'; return 1 ;;
-        esac
-    fi
     password=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
         fail '生成节点密码失败'
         return 1
@@ -1437,12 +1122,10 @@ add_tls_node() {
     }
     jq --arg protocol "$protocol" --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" \
         --arg password "$password" --arg sni "$server" \
-        --arg fingerprint "$NEW_TLS_FINGERPRINT" --arg obfs_password "$obfs_password" --argjson port "$port" \
-        --argjson first "$first" --argjson last "$last" --argjson interval "$interval" '
+        --arg fingerprint "$NEW_TLS_FINGERPRINT" --arg obfs_password "$obfs_password" --argjson port "$port" '
         .nodes += [{protocol:$protocol,id:$id,tag:$tag,name:$name,server:$server,port:$port,password:$password,
             sni:$sni,insecure:true,cert_sha256:$fingerprint}
-            + (if $protocol == "hysteria2" then {obfs_password:$obfs_password} else {} end)
-            + (if $first > 0 then {hy2_hop:{first:$first,last:$last,interval:$interval}} else {} end)]' \
+            + (if $protocol == "hysteria2" then {obfs_password:$obfs_password} else {} end)]' \
         "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
@@ -1451,10 +1134,6 @@ add_tls_node() {
     if apply_transaction "$new_config" "$new_meta" "$((current_count + 1))"; then
         success "节点 [$name] 添加成功"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$current_count")" "$NC"
-        if ((first > 0)); then
-            print_hy2_hop_config "$current_count"
-            warn "请放行公网入口的 UDP $first-$last，包括云防火墙或上游 NAT"
-        fi
     else
         rm -f "$new_config" "$new_meta"
         return 1
@@ -1527,9 +1206,6 @@ view_nodes() {
         [[ "$protocol" != vless-reality ]] || protocol=Vless
         printf '  %s[%s] %s (%s) @ %s%s\n' "$GREEN" "$index" "$name" "$protocol" "$port" "$NC"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$((index - 1))")" "$NC"
-        if [[ "$protocol" == hysteria2 ]]; then
-            print_hy2_hop_config "$((index - 1))"
-        fi
         printf '\n'
     done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE")
 }
@@ -1971,50 +1647,6 @@ apply_tls_node_update() {
     fi
 }
 
-save_hy2_hop_config() (
-    local index="$1" first="$2" last="$3" interval="$4" candidate before after
-    before=$(hy2_hop_plan "$CONFIG_FILE" "$META_FILE") || exit 1
-    candidate=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || exit 1
-    trap 'rm -f -- "$candidate"' EXIT
-    jq --argjson i "$index" --argjson first "$first" --argjson last "$last" --argjson interval "$interval" '
-        if .nodes[$i].protocol != "hysteria2" then error("not a Hysteria2 node")
-        elif $first == 0 then del(.nodes[$i].hy2_hop)
-        else .nodes[$i].hy2_hop = {first:$first,last:$last,interval:$interval} end
-    ' "$META_FILE" > "$candidate" || exit 1
-    after=$(hy2_hop_plan "$CONFIG_FILE" "$candidate") || exit 1
-    hy2_nft_sync "$after" "$before" || exit 1
-    if ! mv -f -- "$candidate" "$META_FILE"; then
-        hy2_nft_sync "$before" "$after" || warn 'Hy2 转发回滚失败，请检查 nftables 规则'
-        fail '节点元数据保存失败'
-        exit 1
-    fi
-)
-
-modify_hy2_hop() {
-    local index="$1" range interval first=0 last=0 current current_interval
-    current=$(jq -r --argjson i "$index" '
-        .nodes[$i].hy2_hop // empty | "\(.first)-\(.last)"
-    ' "$META_FILE") || return 1
-    current_interval=$(jq -r --argjson i "$index" --argjson default "$HY2_HOP_INTERVAL" \
-        '.nodes[$i].hy2_hop.interval // $default' "$META_FILE") || return 1
-    print_hy2_hop_config "$index" || return 1
-    read_input range "  UDP 跳跃范围 (当前：${current:-关闭}，例 20000-20099，0 关闭，回车保持): " || return 1
-    [[ -n "$range" ]] || return 0
-    interval=$current_interval
-    if [[ "$range" != 0 ]]; then
-        read_hy2_hop_values "$range" "$current_interval" || return 1
-        printf '  跳跃配置：UDP %s-%s，每 %s 秒\n' "$first" "$last" "$interval"
-        warn "请放行公网入口的 UDP $first-$last，包括云防火墙或上游 NAT"
-    else
-        [[ -n "$current" ]] || return 0
-        info '将关闭此节点的端口跳跃'
-    fi
-    confirm_node_update || return 1
-    save_hy2_hop_config "$index" "$first" "$last" "$interval" || return 1
-    success '端口跳跃配置已保存'
-    print_hy2_hop_config "$index"
-}
-
 modify_tls_node() {
     local index="$1" tag protocol name server port password
     local choice value field old_value network
@@ -2033,9 +1665,6 @@ modify_tls_node() {
         printf '\n  当前节点: %s%s%s (%s) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改密码\n' \
             "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
-        if [[ "$protocol" == hysteria2 ]]; then
-            printf '  %s[5]%s 端口跳跃\n' "$GREEN" "$NC"
-        fi
         printf '  %s[0]%s 返回\n' "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
         case "$choice" in
@@ -2093,16 +1722,6 @@ modify_tls_node() {
                 printf '  密码：%s\n' "$value"
                 old_value=$password
                 password=$value
-                ;;
-            5)
-                if [[ "$protocol" != hysteria2 ]]; then
-                    fail '无效选择'
-                    continue
-                fi
-                modify_hy2_hop "$index"
-                ((MENU_CANCELLED || INPUT_EOF)) && return 1
-                pause_enter '  按回车返回修改节点菜单...'
-                continue
                 ;;
             *)
                 fail '无效选择'
@@ -2201,13 +1820,11 @@ clear_nodes() {
 }
 # === 服务菜单动作、脚本更新与卸载 ===
 start_service() {
-    local hop_plan
     (($(node_count) > 0)) || {
         warn '暂无节点，无法启动 sing-box'
         return 1
     }
     require_core || return 1
-    hop_plan=$(hy2_hop_plan "$CONFIG_FILE" "$META_FILE") && hy2_nft_sync "$hop_plan" || return 1
     write_service_unit || return 1
     if ! svc_enabled; then
         svc_enable || {
@@ -2233,13 +1850,11 @@ stop_service() {
     success 'sing-box 已停止，开机自启已关闭'
 }
 restart_service() {
-    local hop_plan
     (($(node_count) > 0)) || {
         warn '暂无节点，无法重启 sing-box'
         return 1
     }
     require_core || return 1
-    hop_plan=$(hy2_hop_plan "$CONFIG_FILE" "$META_FILE") && hy2_nft_sync "$hop_plan" || return 1
     write_service_unit || return 1
     if ! svc_enabled; then
         svc_enable || {
@@ -2398,7 +2013,6 @@ uninstall() {
         fail 'sing-box 服务或开机自启仍未关闭，未执行卸载'
         return 1
     fi
-    hy2_nft_sync '' || return 1
     remove_uninstall_paths -f "$SYSTEMD_UNIT" "$SYSTEMD_UNIT.bak" "$SYSTEMD_STARTUP" "$OPENRC_UNIT" "$OPENRC_UNIT.bak" "$OPENRC_STARTUP" || return 1
     if [[ "$INIT_SYSTEM" == systemd ]]; then
         systemctl daemon-reload > /dev/null 2>&1 9>&- || {
