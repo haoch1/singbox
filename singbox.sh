@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.5.2"
+SCRIPT_VERSION="1.5.3"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -964,16 +964,6 @@ read_hy2_hop_values() {
     interval=$((10#$value))
 }
 
-print_hy2_hop_config() {
-    local index="$1" settings first last interval
-    settings=$(jq -r --argjson i "$index" '
-        .nodes[$i].hy2_hop // empty | [.first, .last, .interval] | @tsv
-    ' "$META_FILE") || return 1
-    [[ -n "$settings" ]] || return 0
-    IFS=$'\t' read -r first last interval <<< "$settings"
-    printf '  跳跃端口：%s-%s\n  切换间隔：%s 秒\n' "$first" "$last" "$interval"
-}
-
 check_config() {
     local mode="${1:-verbose}" file="${2:-$CONFIG_FILE}"
     resolve_core > /dev/null 2>&1 || true
@@ -1583,9 +1573,6 @@ view_nodes() {
         [[ "$protocol" != vless-reality ]] || protocol=Vless
         printf '  %s[%s] %s (%s) @ %s%s\n' "$GREEN" "$index" "$name" "$protocol" "$port" "$NC"
         printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$((index - 1))")" "$NC"
-        if [[ "$protocol" == hysteria2 ]]; then
-            print_hy2_hop_config "$((index - 1))"
-        fi
         printf '\n'
     done < <(jq -r '.nodes | to_entries[] | [.key+1,.value.name,(.value.protocol // "vless-reality"),(.value.port|tostring)] | @tsv' "$META_FILE")
 }
