@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.5.3"
+SCRIPT_VERSION="1.5.5"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -33,6 +33,7 @@ DEFAULT_PORT=443
 DEFAULT_SS_PORT=8080
 DEFAULT_HY2_PORT=8080
 DEFAULT_ANYTLS_PORT=443
+DEFAULT_SOCKS_PORT=1080
 DEFAULT_SNI="www.bing.com"
 SS2022_METHOD="2022-blake3-aes-128-gcm"
 INIT_SYSTEM="direct"
@@ -528,7 +529,7 @@ node_fields() {
            .uuid, .sni, .public_key, .short_id, .password,
            (.insecure // false), (.cert_sha256 // ""), (.obfs_password // ""),
            (if .hy2_hop != null then "\(.hy2_hop.first)-\(.hy2_hop.last)" else "" end),
-           (.hy2_hop.interval // 30)]
+           (.hy2_hop.interval // 30), (.username // "")]
         | .[] | tostring + "\u0000"' "$META_FILE"
 }
 
@@ -543,7 +544,7 @@ port_conflict() {
     jq -e --argjson p "$port" --arg e "$exclude" --arg mode "$mode" '
         .nodes[]? | select((.port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))
         | (.protocol // "vless-reality") as $protocol
-        | select($mode == "tcp_udp" or $protocol == "ss2022"
+        | select($mode == "tcp_udp" or $protocol == "ss2022" or $protocol == "socks5"
             or ($mode == "udp" and $protocol == "hysteria2")
             or ($mode == "tcp" and $protocol != "hysteria2"))' "$META_FILE" > /dev/null 2>&1 && return 0
     jq -e --argjson p "$port" --arg e "$exclude" --arg mode "$mode" '
@@ -589,6 +590,13 @@ build_ss2022_link() {
     printf 'ss://%s@%s:%s#%s' "$userinfo" "$host" "$port" "$(uri_escape "$name")"
 }
 
+build_socks5_link() {
+    local server="$1" port="$2" username="$3" password="$4" name="$5" host
+    host=$(format_server_for_uri "$server")
+    printf 'socks5://%s:%s@%s:%s?udp=1#%s' "$(uri_escape "$username")" "$(uri_escape "$password")" \
+        "$host" "$port" "$(uri_escape "$name")"
+}
+
 build_tls_link() {
     local protocol="$1" server="$2" port="$3" password="$4" sni="$5" name="$6"
     local insecure="${7:-false}" fingerprint="${8:-}" obfs_password="${9:-}" host
@@ -626,6 +634,7 @@ build_node_link() {
             build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name"
             ;;
         ss2022) build_ss2022_link "$server" "$port" "$password" "$name" ;;
+        socks5) build_socks5_link "$server" "$port" "${fields[14]:-}" "$password" "$name" ;;
         hysteria2 | anytls)
             build_tls_link "$protocol" "$server" "$port" "$password" "$sni" "$name" \
                 "${fields[9]:-false}" "${fields[10]:-}" "${fields[11]:-}" "${fields[12]:-}" "${fields[13]:-30}"
@@ -1226,6 +1235,12 @@ valid_password() {
     [[ -n "$1" && ${#1} -le 256 && "$1" != *[[:cntrl:]]* ]]
 }
 
+valid_socks_auth() {
+    # SOCKS5 用户名和密码长度均以一个字节编码，按字节限制为 1–255
+    local LC_ALL=C
+    [[ -n "$1" && ${#1} -le 255 && "$1" != *[[:cntrl:]]* ]]
+}
+
 certificate_fingerprint() {
     # 对叶证书 DER 求 SHA-256，与 Hysteria2 URI 的 pinSHA256 定义一致
     printf '%s\n' "$1" | awk '/-----BEGIN CERTIFICATE-----/{body=1; next} /-----END CERTIFICATE-----/{exit} body{print}' |
@@ -1396,6 +1411,76 @@ add_ss2022_node() {
     fi
 }
 
+add_socks5_node() {
+    require_core || return 1
+    local server port name username password id tag current_count new_config new_meta
+    server=$(server_ip_guess)
+    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
+    server=${server:-$(server_ip_guess)}
+    while [[ -z "$server" ]] || ! valid_text "$server"; do
+        fail '请输入有效的 IP 或域名'
+        read_input server '  服务器地址: ' || return 1
+    done
+    while true; do
+        read_input port "  监听端口 (默认 $DEFAULT_SOCKS_PORT): " || return 1
+        port=${port:-$DEFAULT_SOCKS_PORT}
+        valid_port "$port" || {
+            fail '端口应为 1–65535'
+            continue
+        }
+        port=$((10#$port))
+        port_conflict "$port" '' tcp_udp && {
+            fail "TCP/UDP 端口 $port 已被占用"
+            continue
+        }
+        break
+    done
+    name="SOCKS5-$port"
+    read_input name "  节点名称 (默认 $name): " || return 1
+    name=${name:-"SOCKS5-$port"}
+    valid_name "$name" || {
+        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
+        return 1
+    }
+    username=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null) &&
+        password=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
+        fail '生成 SOCKS5 用户名或密码失败'
+        return 1
+    }
+    [[ "$username" =~ ^[0-9a-f]{16}$ && "$password" =~ ^[0-9a-f]{64}$ ]] || {
+        fail '生成 SOCKS5 用户名或密码失败'
+        return 1
+    }
+    id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null) || return 1
+    tag="socks-in-$id"
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
+    jq --arg tag "$tag" --arg username "$username" --arg password "$password" --argjson port "$port" '
+        .inbounds += [{type:"socks",tag:$tag,listen:"::",listen_port:$port,
+            users:[{username:$username,password:$password}]}]' "$CONFIG_FILE" > "$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" \
+        --arg username "$username" --arg password "$password" --argjson port "$port" '
+        .nodes += [{protocol:"socks5",id:$id,tag:$tag,name:$name,server:$server,port:$port,
+            username:$username,password:$password}]' "$META_FILE" > "$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    current_count=$(node_count)
+    if apply_transaction "$new_config" "$new_meta" "$((current_count + 1))"; then
+        success "节点 [$name] 添加成功"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$current_count")" "$NC"
+    else
+        rm -f "$new_config" "$new_meta"
+        return 1
+    fi
+}
+
 add_tls_node() {
     local protocol="$1" label default_port mode server port name password id tag
     local new_config new_meta current_count obfs_password=''
@@ -1510,14 +1595,15 @@ add_tls_node() {
 add_node() {
     local protocol
     require_core || return 1
-    printf '\n  请选择协议:\n\n  %s[1]%s Vless\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s AnyTLS\n  %s[4]%s Hysteria2\n  %s[0]%s 返回\n' \
-        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+    printf '\n  请选择协议:\n\n  %s[1]%s Vless\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s AnyTLS\n  %s[4]%s Hysteria2\n  %s[5]%s SOCKS5\n  %s[0]%s 返回\n' \
+        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
     read_input protocol '  请选择协议: ' || return 1
     case "$protocol" in
         1) add_vless_node ;;
         2) add_ss2022_node ;;
         3) add_tls_node anytls ;;
         4) add_tls_node hysteria2 ;;
+        5) add_socks5_node ;;
         0 | '') return 0 ;;
         *)
             fail '无效选择'
@@ -1969,12 +2055,18 @@ modify_ss2022_node() {
     done
 }
 
-apply_tls_node_update() {
+apply_password_node_update() {
     local index="$1" tag="$2" protocol="$3" name="$4" server="$5" port="$6" password="$7"
-    local new_config new_meta count
-    # 只更新明确匹配的一个节点，保留证书、SNI 和其他未编辑字段
-    jq -e --arg tag "$tag" --arg protocol "$protocol" '
-        [.inbounds[]? | select(.tag==$tag)] | length == 1 and .[0].type==$protocol' "$CONFIG_FILE" > /dev/null &&
+    local username="${8:-}" type="$protocol" new_config new_meta count
+    [[ "$protocol" != socks5 ]] || type=socks
+    if [[ "$protocol" == socks5 ]] &&
+        { ! valid_socks_auth "$username" || ! valid_socks_auth "$password" || [[ "$username" == *:* ]]; }; then
+        fail 'SOCKS5 凭据必须为 1–255 字节且不包含控制字符，用户名不能包含冒号'
+        return 1
+    fi
+    # 密码认证节点共用编辑事务，只更新所选字段，保留 TLS 和端口跳跃配置
+    jq -e --arg tag "$tag" --arg type "$type" '
+        [.inbounds[]? | select(.tag==$tag)] | length == 1 and .[0].type==$type' "$CONFIG_FILE" > /dev/null &&
         jq -e --arg tag "$tag" --arg protocol "$protocol" --argjson i "$index" '
             ([.nodes[]? | select(.tag==$tag)] | length) == 1 and .nodes[$i].tag==$tag
             and .nodes[$i].protocol==$protocol' "$META_FILE" > /dev/null || {
@@ -1986,20 +2078,26 @@ apply_tls_node_update() {
         rm -f "$new_config"
         return 1
     }
-    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" '
-        (.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].password=$password)' "$CONFIG_FILE" > "$new_config" || {
+    jq --arg tag "$tag" --arg password "$password" --arg username "$username" --arg type "$type" --argjson port "$port" '
+        (.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].password=$password
+            | if $type == "socks" then .users[0].username=$username else . end)' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
-    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '
-        (.nodes[] | select(.tag==$tag)) |= (.name=$name | .server=$server | .port=$port | .password=$password)' "$META_FILE" > "$new_meta" || {
+    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" \
+        --arg username "$username" --arg type "$type" --argjson port "$port" '
+        (.nodes[] | select(.tag==$tag)) |= (.name=$name | .server=$server | .port=$port | .password=$password
+            | if $type == "socks" then .username=$username else . end)' "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
-    jq -e --arg tag "$tag" --arg password "$password" --argjson port "$port" '
-        any(.inbounds[]; .tag==$tag and .listen_port==$port and .users[0].password==$password)' "$new_config" > /dev/null &&
-        jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '
-            any(.nodes[]; .tag==$tag and .name==$name and .server==$server and .port==$port and .password==$password)' "$new_meta" > /dev/null || {
+    jq -e --arg tag "$tag" --arg password "$password" --arg username "$username" --arg type "$type" --argjson port "$port" '
+        any(.inbounds[]; .tag==$tag and .type==$type and .listen_port==$port and .users[0].password==$password
+            and ($type != "socks" or .users[0].username==$username))' "$new_config" > /dev/null &&
+        jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" \
+            --arg username "$username" --arg type "$type" --argjson port "$port" '
+            any(.nodes[]; .tag==$tag and .name==$name and .server==$server and .port==$port and .password==$password
+                and ($type != "socks" or .username==$username))' "$new_meta" > /dev/null || {
         rm -f "$new_config" "$new_meta"
         fail '节点修改结果校验失败'
         return 1
@@ -2053,9 +2151,10 @@ modify_hy2_hop() {
     return 0
 }
 
-modify_tls_node() {
-    local index="$1" tag protocol name server port password
-    local choice value field old_value network
+modify_password_node() {
+    local index="$1" tag protocol name server port password username
+    local choice value field old_value network network_label
+    local password_validator password_error
     local -a fields
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
@@ -2066,13 +2165,25 @@ modify_tls_node() {
         port=${fields[2]-}
         name=${fields[3]-}
         password=${fields[8]-}
+        username=${fields[14]-}
         network=tcp
         [[ "$protocol" != hysteria2 ]] || network=udp
+        password_validator=valid_password
+        password_error='密码不能为空、不能超过 256 字或包含控制字符'
+        if [[ "$protocol" == socks5 ]]; then
+            network=tcp_udp
+            password_validator=valid_socks_auth
+            password_error='密码不能为空、不能超过 255 字节或包含控制字符'
+        fi
+        network_label=${network^^}
+        [[ "$network" != tcp_udp ]] || network_label=TCP/UDP
         printf '\n  当前节点: %s%s%s (%s) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改密码\n' \
             "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         if [[ "$protocol" == hysteria2 ]]; then
             printf '  %s[5]%s 端口跳跃\n' "$GREEN" "$NC"
+        elif [[ "$protocol" == socks5 ]]; then
+            printf '  %s[5]%s 修改用户名\n' "$GREEN" "$NC"
         fi
         printf '  %s[0]%s 返回\n' "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
@@ -2109,7 +2220,7 @@ modify_tls_node() {
                 }
                 value=$((10#$value))
                 if ((value != port)) && port_conflict "$value" "$tag" "$network"; then
-                    fail "${network^^} 端口 $value 已被占用"
+                    fail "$network_label 端口 $value 已被占用"
                     continue
                 fi
                 printf '  监听端口：%s\n' "$value"
@@ -2124,8 +2235,8 @@ modify_tls_node() {
                         continue
                     }
                 fi
-                valid_password "$value" || {
-                    fail '密码不能为空、不能超过 256 字或包含控制字符'
+                "$password_validator" "$value" || {
+                    fail "$password_error"
                     continue
                 }
                 printf '  密码：%s\n' "$value"
@@ -2133,14 +2244,26 @@ modify_tls_node() {
                 password=$value
                 ;;
             5)
-                if [[ "$protocol" != hysteria2 ]]; then
+                if [[ "$protocol" == socks5 ]]; then
+                    read_input value "  请输入新用户名 (回车保持 $username): " || return 1
+                    value=${value:-$username}
+                    # 常见链接导入器先解码认证字段再按冒号拆分，用户名中禁用该分隔符
+                    valid_socks_auth "$value" && [[ "$value" != *:* ]] || {
+                        fail '用户名不能为空、不能超过 255 字节或包含冒号、控制字符'
+                        continue
+                    }
+                    printf '  用户名：%s\n' "$value"
+                    old_value=$username
+                    username=$value
+                elif [[ "$protocol" == hysteria2 ]]; then
+                    modify_hy2_hop "$index"
+                    ((MENU_CANCELLED || INPUT_EOF)) && return 1
+                    pause_enter '  按回车返回修改节点菜单...'
+                    continue
+                else
                     fail '无效选择'
                     continue
                 fi
-                modify_hy2_hop "$index"
-                ((MENU_CANCELLED || INPUT_EOF)) && return 1
-                pause_enter '  按回车返回修改节点菜单...'
-                continue
                 ;;
             *)
                 fail '无效选择'
@@ -2155,7 +2278,7 @@ modify_tls_node() {
             ((MENU_CANCELLED || INPUT_EOF)) && return 1
             continue
         }
-        if ! apply_tls_node_update "$index" "$tag" "$protocol" "$name" "$server" "$port" "$password"; then
+        if ! apply_password_node_update "$index" "$tag" "$protocol" "$name" "$server" "$port" "$password" "$username"; then
             return 1
         fi
         pause_enter '  按回车返回修改节点菜单...'
@@ -2170,7 +2293,7 @@ modify_node() {
     case "$protocol" in
         vless-reality) modify_vless_node "$index" ;;
         ss2022) modify_ss2022_node "$index" ;;
-        hysteria2 | anytls) modify_tls_node "$index" ;;
+        hysteria2 | anytls | socks5) modify_password_node "$index" ;;
         *)
             fail '节点协议不受支持'
             return 1
