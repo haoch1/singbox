@@ -2,7 +2,7 @@
 
 Linux sing-box 多协议节点管理脚本，提供节点管理、服务控制和核心更新
 
-管理脚本版本：`1.3.9`
+管理脚本版本：`1.5.2`
 
 ## 安装
 
@@ -32,6 +32,16 @@ Hysteria2、AnyTLS 的默认 SNI 取创建时的服务器地址，每个节点�
 新建 Hysteria2 节点自动生成独立的 Salamander 混淆密码。节点编辑保留现有证书、SNI 和混淆设置。服务器防火墙和 NAT 映射需放行对应端口及传输协议
 
 生成 `vless://`、`ss://`、`anytls://`、`hysteria2://` 单节点分享链接，支持 IPv6 地址格式化和参数 URI 编码
+
+### Hysteria2 端口跳跃
+
+新建 Hysteria2 节点时设置跳跃端口与切换间隔，默认范围为 `20000-29999`，间隔为 `30` 秒，两项均可回车采用默认值。范围被已有节点或监听端口占用时，自动选取下一组可用的 10000 个端口。端口输入 `0` 关闭跳跃。已有节点通过 `[3] 修改节点` → `[5] 端口跳跃` 设置
+
+跳跃所需的 nftables 按需安装，通过专用规则将 UDP 范围重定向至节点主端口，兼容 IPv4、IPv6。脚本自动维护规则及 systemd/OpenRC 启动恢复配置，direct 模式通过管理脚本启动或重启时恢复。云防火墙及上游 NAT 需要放行对应 UDP 范围
+
+开启跳跃后的分享链接包含 `mport` 端口范围，可直接导入 Clash Verge。Clash Verge 的链接导入使用客户端默认 `30` 秒间隔；自定义间隔通过链接的 `hop_interval` 提供给支持该参数的客户端，Mihomo 配置对应 `hop-interval`
+
+关闭跳跃、删除节点或清空节点时同步清理对应规则，最后一组规则移除后清理规则文件和启动恢复配置。仅操作脚本维护的 `inet singbox_hy2` 表，范围冲突或权限不足时显示错误并回滚
 
 ## 管理菜单
 
@@ -64,6 +74,7 @@ Hysteria2、AnyTLS 的默认 SNI 取创建时的服务器地址，每个节点�
 | `/usr/local/bin/sing-box` | 托管核心 |
 | `/usr/local/etc/sing-box/config.json` | 核心配置及 TLS 证书、私钥 |
 | `/usr/local/etc/sing-box/nodes.json` | 节点元数据 |
+| `/usr/local/etc/sing-box/hy2-hopping.nft` | Hy2 端口跳跃规则 |
 | `/etc/systemd/system/sing-box.service` | systemd 核心服务 |
 | `/etc/init.d/sing-box` | OpenRC 核心服务 |
 | `/var/log/sing-box.log` | OpenRC/direct 核心日志 |
