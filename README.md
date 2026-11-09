@@ -1,8 +1,8 @@
 # singbox
 
-Linux sing-box 节点管理脚本，支持 Vless、Shadowsocks 2022、AnyTLS、Hysteria2、SOCKS5 和端口跳跃，提供服务控制与核心更新
+Linux sing-box 节点管理脚本，支持 Vless、Shadowsocks 2022、AnyTLS、Hysteria2 和端口跳跃，提供服务控制与核心更新
 
-管理脚本版本：`1.5.5`
+管理脚本版本：`1.5.6`
 
 ## 安装与运行
 
@@ -22,19 +22,16 @@ Linux sing-box 节点管理脚本，支持 Vless、Shadowsocks 2022、AnyTLS、H
 | Shadowsocks 2022 | `2022-blake3-aes-128-gcm` | `8080/TCP、UDP` | `SS2022-端口` |
 | AnyTLS | 自签名 TLS、核心默认填充方案 | `443/TCP` | `AnyTLS-端口` |
 | Hysteria2 | 自签名 TLS、Salamander 混淆 | `8080/UDP` | `Hysteria2-端口` |
-| SOCKS5 | 用户名/密码认证、TCP/UDP 转发 | `1080/TCP、UDP` | `SOCKS5-端口` |
 
 提供节点添加、查看、分项修改、删除和清空功能。连接地址支持 IPv4、IPv6 和域名，监听端口与节点名称可自定义，端口冲突按 TCP、UDP 分别检查。查看节点显示编号、摘要和分享链接
 
 Vless 默认伪装域名为 `www.bing.com`。UUID、Reality 密钥、Short ID、节点密码和 TLS 证书由脚本生成
 
-SOCKS5 位于添加节点协议菜单的 `[5]`。用户名和密码自动生成，可通过修改节点调整名称、连接地址、监听端口、密码和用户名
-
 Hysteria2、AnyTLS 使用有效期 10 年的独立自签名证书，SNI 取创建时的服务器地址。证书和私钥内嵌于 `config.json`。分享链接包含 `insecure=1`，Hysteria2 另携带 `pinSHA256` 证书指纹，实际校验行为由客户端支持情况及配置决定
 
 Hysteria2、AnyTLS 要求 sing-box 1.12.0 或更新版本，Hysteria2 还要求核心包含 QUIC 支持。新建 Hysteria2 节点自动生成独立的 Salamander 混淆密码
 
-脚本生成 `vless://`、`ss://`、`anytls://`、`hysteria2://`、`socks5://` 单节点分享链接，支持 IPv6 地址格式化和 URI 参数编码。服务器防火墙、云防火墙及上游 NAT 需要允许相应端口与传输协议
+脚本生成 `vless://`、`ss://`、`anytls://`、`hysteria2://` 单节点分享链接，支持 IPv6 地址格式化和 URI 参数编码。服务器防火墙、云防火墙及上游 NAT 需要允许相应端口与传输协议
 
 ## Hysteria2 端口跳跃
 
