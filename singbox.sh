@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.5.6"
+SCRIPT_VERSION="1.5.7"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -29,10 +29,12 @@ SYSTEMD_UNIT="/etc/systemd/system/sing-box.service"
 SYSTEMD_STARTUP="/etc/systemd/system/multi-user.target.wants/sing-box.service"
 OPENRC_UNIT="/etc/init.d/sing-box"
 OPENRC_STARTUP="/etc/runlevels/default/sing-box"
-DEFAULT_PORT=443
+DEFAULT_PORT=1080
 DEFAULT_SS_PORT=8080
 DEFAULT_HY2_PORT=8080
-DEFAULT_ANYTLS_PORT=443
+DEFAULT_ANYTLS_PORT=1080
+DEFAULT_SNELL_PORT=1080
+SNELL_VERSION=5
 DEFAULT_SNI="www.bing.com"
 SS2022_METHOD="2022-blake3-aes-128-gcm"
 INIT_SYSTEM="direct"
@@ -525,7 +527,7 @@ node_fields() {
     jq -j --argjson i "$1" '
         .nodes[$i]
         | [(.protocol // "vless-reality"), .server, .port, .name,
-           .uuid, .sni, .public_key, .short_id, .password,
+           .uuid, .sni, .public_key, .short_id, (if .protocol == "snell" then .psk else .password end),
            (.insecure // false), (.cert_sha256 // ""), (.obfs_password // ""),
            (if .hy2_hop != null then "\(.hy2_hop.first)-\(.hy2_hop.last)" else "" end),
            (.hy2_hop.interval // 30)]
@@ -549,7 +551,7 @@ port_conflict() {
     jq -e --argjson p "$port" --arg e "$exclude" --arg mode "$mode" '
         .inbounds[]? | select((.listen_port|tonumber?) == $p and ($e == "" or (.tag // "") != $e))
         | (if .type == "hysteria2" or .type == "tuic" or .type == "hysteria" then ["udp"]
-           elif .type == "vless" or .type == "anytls" then ["tcp"]
+           elif .type == "vless" or .type == "anytls" or .type == "snell" then ["tcp"]
            elif .network == "tcp" or .network == "udp" then [.network]
            else ["tcp", "udp"] end) as $networks
         | select($mode == "tcp_udp" or ($networks | index($mode)) != null)' "$CONFIG_FILE" > /dev/null 2>&1 && return 0
@@ -589,6 +591,13 @@ build_ss2022_link() {
     printf 'ss://%s@%s:%s#%s' "$userinfo" "$host" "$port" "$(uri_escape "$name")"
 }
 
+build_snell_link() {
+    local server="$1" port="$2" psk="$3" name="$4" host
+    host=$(format_server_for_uri "$server")
+    printf 'snell://%s@%s:%s?version=%s&udp=1#%s' \
+        "$(uri_escape "$psk")" "$host" "$port" "$SNELL_VERSION" "$(uri_escape "$name")"
+}
+
 build_tls_link() {
     local protocol="$1" server="$2" port="$3" password="$4" sni="$5" name="$6"
     local insecure="${7:-false}" fingerprint="${8:-}" obfs_password="${9:-}" host
@@ -626,6 +635,7 @@ build_node_link() {
             build_vless_link "$server" "$port" "$uuid" "$sni" "$public" "$sid" "$name"
             ;;
         ss2022) build_ss2022_link "$server" "$port" "$password" "$name" ;;
+        snell) build_snell_link "$server" "$port" "$password" "$name" ;;
         hysteria2 | anytls)
             build_tls_link "$protocol" "$server" "$port" "$password" "$sni" "$name" \
                 "${fields[9]:-false}" "${fields[10]:-}" "${fields[11]:-}" "${fields[12]:-}" "${fields[13]:-30}"
@@ -666,7 +676,7 @@ hy2_hop_plan() {
         def port: type == "number" and . >= 1 and . <= 65535 and floor == .;
         def udp:
             .type == "hysteria2" or .type == "hysteria" or .type == "tuic"
-            or (.type != "vless" and .type != "anytls" and .network != "tcp");
+            or (.type != "vless" and .type != "anytls" and .type != "snell" and .network != "tcp");
         ($config[0].inbounds // []) as $inbounds
         | [$meta[0].nodes[] | select(.hy2_hop != null)
             | . as $node | .hy2_hop as $hop
@@ -1226,6 +1236,17 @@ valid_password() {
     [[ -n "$1" && ${#1} -le 256 && "$1" != *[[:cntrl:]]* ]]
 }
 
+require_snell_core() {
+    local version
+    require_core || return 1
+    version=$(core_version)
+    if [[ "$version" =~ ^v([0-9]+)\.([0-9]+)\. ]] &&
+        ((BASH_REMATCH[1] > 1 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] >= 14))); then
+        return 0
+    fi
+    fail 'Snell 需要 sing-box 1.14.0 或更新版本，请先执行菜单 [9]'
+}
+
 certificate_fingerprint() {
     # 对叶证书 DER 求 SHA-256，与 Hysteria2 URI 的 pinSHA256 定义一致
     printf '%s\n' "$1" | awk '/-----BEGIN CERTIFICATE-----/{body=1; next} /-----END CERTIFICATE-----/{exit} body{print}' |
@@ -1396,6 +1417,75 @@ add_ss2022_node() {
     fi
 }
 
+add_snell_node() {
+    require_snell_core || return 1
+    local server port name psk id tag current_count new_config new_meta
+    server=$(server_ip_guess)
+    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
+    server=${server:-$(server_ip_guess)}
+    while [[ -z "$server" ]] || ! valid_text "$server"; do
+        fail '请输入有效的 IP 或域名'
+        read_input server '  服务器地址: ' || return 1
+    done
+    while true; do
+        read_input port "  监听端口 (默认 $DEFAULT_SNELL_PORT): " || return 1
+        port=${port:-$DEFAULT_SNELL_PORT}
+        valid_port "$port" || {
+            fail '端口应为 1–65535'
+            continue
+        }
+        port=$((10#$port))
+        port_conflict "$port" '' tcp && {
+            fail "TCP 端口 $port 已被占用"
+            continue
+        }
+        break
+    done
+    name="Snell-$port"
+    read_input name "  节点名称 (默认 $name): " || return 1
+    name=${name:-"Snell-$port"}
+    valid_name "$name" || {
+        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
+        return 1
+    }
+    psk=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
+        fail '生成 Snell PSK 失败'
+        return 1
+    }
+    [[ "$psk" =~ ^[0-9a-f]{64}$ ]] || {
+        fail '生成 Snell PSK 失败'
+        return 1
+    }
+    id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null) || return 1
+    tag="snell-in-$id"
+    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$new_config"
+        return 1
+    }
+    jq --arg tag "$tag" --arg psk "$psk" --argjson port "$port" --argjson version "$SNELL_VERSION" '
+        .inbounds += [{type:"snell",tag:$tag,listen:"::",listen_port:$port,version:$version,psk:$psk}]' \
+        "$CONFIG_FILE" > "$new_config" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    jq --arg id "$id" --arg tag "$tag" --arg name "$name" --arg server "$server" --arg psk "$psk" \
+        --argjson port "$port" --argjson version "$SNELL_VERSION" '
+        .nodes += [{protocol:"snell",id:$id,tag:$tag,name:$name,server:$server,port:$port,version:$version,psk:$psk}]' \
+        "$META_FILE" > "$new_meta" || {
+        rm -f "$new_config" "$new_meta"
+        return 1
+    }
+    current_count=$(node_count)
+    if apply_transaction "$new_config" "$new_meta" "$((current_count + 1))"; then
+        success "节点 [$name] 添加成功"
+        printf '  %s节点链接:%s %s%s%s\n' "$YELLOW" "$NC" "$GREEN" "$(build_node_link "$current_count")" "$NC"
+    else
+        rm -f "$new_config" "$new_meta"
+        return 1
+    fi
+}
+
 add_tls_node() {
     local protocol="$1" label default_port mode server port name password id tag
     local new_config new_meta current_count obfs_password=''
@@ -1510,14 +1600,15 @@ add_tls_node() {
 add_node() {
     local protocol
     require_core || return 1
-    printf '\n  请选择协议:\n\n  %s[1]%s Vless\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s AnyTLS\n  %s[4]%s Hysteria2\n  %s[0]%s 返回\n' \
-        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+    printf '\n  请选择协议:\n\n  %s[1]%s Vless\n  %s[2]%s Shadowsocks 2022\n  %s[3]%s AnyTLS\n  %s[4]%s Hysteria2\n  %s[5]%s Snell\n  %s[0]%s 返回\n' \
+        "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
     read_input protocol '  请选择协议: ' || return 1
     case "$protocol" in
         1) add_vless_node ;;
         2) add_ss2022_node ;;
         3) add_tls_node anytls ;;
         4) add_tls_node hysteria2 ;;
+        5) add_snell_node ;;
         0 | '') return 0 ;;
         *)
             fail '无效选择'
@@ -1969,15 +2060,18 @@ modify_ss2022_node() {
     done
 }
 
-apply_tls_node_update() {
+apply_password_node_update() {
     local index="$1" tag="$2" protocol="$3" name="$4" server="$5" port="$6" password="$7"
-    local new_config new_meta count
-    # 只更新明确匹配的一个节点，保留证书、SNI 和其他未编辑字段
-    jq -e --arg tag "$tag" --arg protocol "$protocol" '
-        [.inbounds[]? | select(.tag==$tag)] | length == 1 and .[0].type==$protocol' "$CONFIG_FILE" > /dev/null &&
-        jq -e --arg tag "$tag" --arg protocol "$protocol" --argjson i "$index" '
+    local secret_key=password new_config new_meta count
+    [[ "$protocol" != snell ]] || secret_key=psk
+    # 密码与 PSK 节点共用编辑事务，只更新所选字段，保留证书和协议选项
+    jq -e --arg tag "$tag" --arg protocol "$protocol" --argjson version "$SNELL_VERSION" '
+        [.inbounds[]? | select(.tag==$tag)] | length == 1 and .[0].type==$protocol
+            and ($protocol != "snell" or .[0].version==$version)' "$CONFIG_FILE" > /dev/null &&
+        jq -e --arg tag "$tag" --arg protocol "$protocol" --argjson i "$index" --argjson version "$SNELL_VERSION" '
             ([.nodes[]? | select(.tag==$tag)] | length) == 1 and .nodes[$i].tag==$tag
-            and .nodes[$i].protocol==$protocol' "$META_FILE" > /dev/null || {
+            and .nodes[$i].protocol==$protocol
+            and ($protocol != "snell" or .nodes[$i].version==$version)' "$META_FILE" > /dev/null || {
         fail '目标节点信息不一致，未应用修改，请重新进入菜单'
         return 1
     }
@@ -1986,20 +2080,24 @@ apply_tls_node_update() {
         rm -f "$new_config"
         return 1
     }
-    jq --arg tag "$tag" --arg password "$password" --argjson port "$port" '
-        (.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port | .users[0].password=$password)' "$CONFIG_FILE" > "$new_config" || {
+    jq --arg tag "$tag" --arg password "$password" --arg protocol "$protocol" --argjson port "$port" '
+        (.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port
+            | if $protocol == "snell" then .psk=$password else .users[0].password=$password end)' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
-    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '
-        (.nodes[] | select(.tag==$tag)) |= (.name=$name | .server=$server | .port=$port | .password=$password)' "$META_FILE" > "$new_meta" || {
+    jq --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" \
+        --arg key "$secret_key" --argjson port "$port" '
+        (.nodes[] | select(.tag==$tag)) |= (.name=$name | .server=$server | .port=$port | .[$key]=$password)' "$META_FILE" > "$new_meta" || {
         rm -f "$new_config" "$new_meta"
         return 1
     }
-    jq -e --arg tag "$tag" --arg password "$password" --argjson port "$port" '
-        any(.inbounds[]; .tag==$tag and .listen_port==$port and .users[0].password==$password)' "$new_config" > /dev/null &&
-        jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" --argjson port "$port" '
-            any(.nodes[]; .tag==$tag and .name==$name and .server==$server and .port==$port and .password==$password)' "$new_meta" > /dev/null || {
+    jq -e --arg tag "$tag" --arg password "$password" --arg protocol "$protocol" --argjson port "$port" '
+        any(.inbounds[]; .tag==$tag and .type==$protocol and .listen_port==$port
+            and (if $protocol == "snell" then .psk else .users[0].password end)==$password)' "$new_config" > /dev/null &&
+        jq -e --arg tag "$tag" --arg name "$name" --arg server "$server" --arg password "$password" \
+            --arg key "$secret_key" --argjson port "$port" '
+            any(.nodes[]; .tag==$tag and .name==$name and .server==$server and .port==$port and .[$key]==$password)' "$new_meta" > /dev/null || {
         rm -f "$new_config" "$new_meta"
         fail '节点修改结果校验失败'
         return 1
@@ -2053,9 +2151,9 @@ modify_hy2_hop() {
     return 0
 }
 
-modify_tls_node() {
+modify_password_node() {
     local index="$1" tag protocol name server port password
-    local choice value field old_value network
+    local choice value field old_value network credential_label
     local -a fields
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
@@ -2068,9 +2166,11 @@ modify_tls_node() {
         password=${fields[8]-}
         network=tcp
         [[ "$protocol" != hysteria2 ]] || network=udp
+        credential_label=密码
+        [[ "$protocol" != snell ]] || credential_label=PSK
         printf '\n  当前节点: %s%s%s (%s) @ %s%s%s\n\n' "$GREEN" "$name" "$NC" "$protocol" "$BLUE" "$port" "$NC"
-        printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改密码\n' \
-            "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
+        printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 修改%s\n' \
+            "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$credential_label"
         if [[ "$protocol" == hysteria2 ]]; then
             printf '  %s[5]%s 端口跳跃\n' "$GREEN" "$NC"
         fi
@@ -2117,18 +2217,18 @@ modify_tls_node() {
                 port=$value
                 ;;
             4)
-                read_input value '  请输入新密码 (回车随机生成): ' || return 1
+                read_input value "  请输入新${credential_label} (回车随机生成): " || return 1
                 if [[ -z "$value" ]]; then
                     value=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
-                        fail '生成节点密码失败'
+                        fail "生成节点${credential_label}失败"
                         continue
                     }
                 fi
                 valid_password "$value" || {
-                    fail '密码不能为空、不能超过 256 字或包含控制字符'
+                    fail "${credential_label}不能为空、不能超过 256 字或包含控制字符"
                     continue
                 }
-                printf '  密码：%s\n' "$value"
+                printf '  %s：%s\n' "$credential_label" "$value"
                 old_value=$password
                 password=$value
                 ;;
@@ -2155,7 +2255,7 @@ modify_tls_node() {
             ((MENU_CANCELLED || INPUT_EOF)) && return 1
             continue
         }
-        if ! apply_tls_node_update "$index" "$tag" "$protocol" "$name" "$server" "$port" "$password"; then
+        if ! apply_password_node_update "$index" "$tag" "$protocol" "$name" "$server" "$port" "$password"; then
             return 1
         fi
         pause_enter '  按回车返回修改节点菜单...'
@@ -2170,7 +2270,7 @@ modify_node() {
     case "$protocol" in
         vless-reality) modify_vless_node "$index" ;;
         ss2022) modify_ss2022_node "$index" ;;
-        hysteria2 | anytls) modify_tls_node "$index" ;;
+        hysteria2 | anytls | snell) modify_password_node "$index" ;;
         *)
             fail '节点协议不受支持'
             return 1

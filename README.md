@@ -1,8 +1,8 @@
 # singbox
 
-Linux sing-box 节点管理脚本，支持 Vless、Shadowsocks 2022、AnyTLS、Hysteria2 和端口跳跃，提供服务控制与核心更新
+Linux sing-box 节点管理脚本，支持 Vless、Shadowsocks 2022、AnyTLS、Hysteria2、Snell 和端口跳跃，提供服务控制与核心更新
 
-管理脚本版本：`1.5.6`
+管理脚本版本：`1.5.7`
 
 ## 安装与运行
 
@@ -16,12 +16,13 @@ Linux sing-box 节点管理脚本，支持 Vless、Shadowsocks 2022、AnyTLS、H
 
 ## 支持协议
 
-| 协议 | 默认配置 | 默认端口 | 默认节点名称 |
+| 协议 | 默认配置 | 默认端口（文档示例） | 默认节点名称 |
 | --- | --- | --- | --- |
-| Vless | TCP、Reality、Vision | `443/TCP` | `Vless-端口` |
+| Vless | TCP、Reality、Vision | `1080/TCP` | `Vless-端口` |
 | Shadowsocks 2022 | `2022-blake3-aes-128-gcm` | `8080/TCP、UDP` | `SS2022-端口` |
-| AnyTLS | 自签名 TLS、核心默认填充方案 | `443/TCP` | `AnyTLS-端口` |
+| AnyTLS | 自签名 TLS、核心默认填充方案 | `1080/TCP` | `AnyTLS-端口` |
 | Hysteria2 | 自签名 TLS、Salamander 混淆 | `8080/UDP` | `Hysteria2-端口` |
+| Snell | v5 入站、自动生成 PSK | `1080/TCP` | `Snell-端口` |
 
 提供节点添加、查看、分项修改、删除和清空功能。连接地址支持 IPv4、IPv6 和域名，监听端口与节点名称可自定义，端口冲突按 TCP、UDP 分别检查。查看节点显示编号、摘要和分享链接
 
@@ -31,7 +32,24 @@ Hysteria2、AnyTLS 使用有效期 10 年的独立自签名证书，SNI 取创�
 
 Hysteria2、AnyTLS 要求 sing-box 1.12.0 或更新版本，Hysteria2 还要求核心包含 QUIC 支持。新建 Hysteria2 节点自动生成独立的 Salamander 混淆密码
 
-脚本生成 `vless://`、`ss://`、`anytls://`、`hysteria2://` 单节点分享链接，支持 IPv6 地址格式化和 URI 参数编码。服务器防火墙、云防火墙及上游 NAT 需要允许相应端口与传输协议
+Snell 要求 sing-box 1.14.0 或更新版本，入站和分享链接统一使用 v5 参数，TCP 和 UDP 代理流量均通过 TCP 连接传输。添加节点时设置连接地址、监听端口与节点名称，PSK 自动生成。修改节点提供名称、地址、端口和 PSK 四项设置
+
+脚本生成 `vless://`、`ss://`、`anytls://`、`hysteria2://`、`snell://` 单节点分享链接，支持 IPv6 地址格式化和 URI 参数编码。服务器防火墙、云防火墙及上游 NAT 需要允许相应端口与传输协议
+
+### Snell 客户端配置
+
+Clash/Mihomo 使用 `version: 5` 和 `udp: true`。Clash Verge 2.5.8、2.5.10 的链接解析器尚未支持 `snell://`，可在本地订阅配置中添加以下节点，地址、端口与 PSK 按节点链接填写
+
+```yaml
+proxies:
+  - name: Snell
+    type: snell
+    server: server.example.com
+    port: 1080
+    psk: "替换为节点 PSK"
+    version: 5
+    udp: true
+```
 
 ## Hysteria2 端口跳跃
 
