@@ -2647,7 +2647,7 @@ menu() {
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
         printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
-        read_input choice '  请输入选项 [0-11] (q 退出): ' || {
+        read_input choice '  请输入选项 [0-11]: ' || {
             ((INPUT_EOF || MENU_CANCELLED)) && return 0
             interrupt_exit
         }
