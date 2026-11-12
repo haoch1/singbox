@@ -253,6 +253,12 @@ pause_enter() {
     return 0
 }
 
+pause_node_menu() {
+    pause_enter '  按回车返回修改节点菜单...' || return 1
+    clear_terminal
+    draw_main_menu
+}
+
 # === 依赖、初始化系统与服务控制 ===
 install_packages() {
     if command -v apt-get > /dev/null 2>&1; then
@@ -1770,69 +1776,69 @@ modify_vless_node() {
                 read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  节点名称：%s\n' "$name"
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 valid_name "$value" || {
                     fail '节点名称无效'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  节点名称：%s\n' "$value"
                 if [[ "$value" == "$name" ]]; then
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 apply_vless_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 continue
                 ;;
             2)
                 read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  客户端连接地址：%s\n' "$server"
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 valid_text "$value" || {
                     fail '客户端连接地址无效'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  客户端连接地址：%s\n' "$value"
                 if [[ "$value" == "$server" ]]; then
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 apply_vless_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 continue
                 ;;
             3)
                 read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  监听端口：%s\n' "$port"
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 valid_port "$value" || {
                     fail '端口应为 1–65535'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 value=$((10#$value))
                 if ((value != port)) && port_conflict "$value" "$tag"; then
                     fail "TCP 端口 $value 已被占用"
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 printf '  监听端口：%s\n' "$value"
                 if ((value == port)); then
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$value" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 continue
                 ;;
             4)
@@ -1841,60 +1847,60 @@ modify_vless_node() {
                     value=$("$SINGBOX_BIN" generate uuid 2> /dev/null)
                     [[ -n "$value" ]] || {
                         fail 'UUID 自动生成失败'
-                        pause_enter '  按回车返回修改节点菜单...' || return 1
+                        pause_node_menu || return 1
                         continue
                     }
                 fi
                 [[ "$value" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || {
                     fail 'UUID 格式无效'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  UUID：%s\n' "$value"
                 if [[ "$value" == "$uuid" ]]; then
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$value" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 continue
                 ;;
             5)
                 read_input value "  请输入新的伪装域名/SNI (回车保持 $sni): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  伪装域名/SNI：%s\n' "$sni"
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 valid_text "$value" || {
                     fail '伪装域名格式无效'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  伪装域名/SNI：%s\n' "$value"
                 if [[ "$value" == "$sni" ]]; then
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 continue
                 ;;
             6)
                 generate_credentials || {
                     fail '生成新凭据失败'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  Reality 私钥：%s\n  Reality 公钥：%s\n  Short ID：%s\n' \
                     "$NEW_PRIVATE" "$NEW_PUBLIC" "$NEW_SHORT_ID"
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$uuid" "$NEW_PUBLIC" "$NEW_SHORT_ID" "$NEW_PRIVATE" || return 1
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 continue
                 ;;
             *)
                 fail '无效选择'
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 ;;
         esac
     done
@@ -1973,12 +1979,12 @@ modify_ss2022_node() {
                 value=${value:-$name}
                 valid_name "$value" || {
                     fail '节点名称无效'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  节点名称：%s\n' "$value"
                 [[ "$value" == "$name" ]] && {
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 apply_ss2022_node_update "$tag" "$value" "$server" "$port" "$password" || return 1
@@ -1988,12 +1994,12 @@ modify_ss2022_node() {
                 value=${value:-$server}
                 valid_text "$value" || {
                     fail '客户端连接地址无效'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  客户端连接地址：%s\n' "$value"
                 [[ "$value" == "$server" ]] && {
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 apply_ss2022_node_update "$tag" "$name" "$value" "$port" "$password" || return 1
@@ -2003,18 +2009,18 @@ modify_ss2022_node() {
                 value=${value:-$port}
                 valid_port "$value" || {
                     fail '端口应为 1–65535'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 value=$((10#$value))
                 if ((value != port)) && port_conflict "$value" "$tag" tcp_udp; then
                     fail "TCP/UDP 端口 $value 已被占用"
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 printf '  监听端口：%s\n' "$value"
                 ((value == port)) && {
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 apply_ss2022_node_update "$tag" "$name" "$server" "$value" "$password" || return 1
@@ -2022,12 +2028,12 @@ modify_ss2022_node() {
             4)
                 value=$("$SINGBOX_BIN" generate rand --base64 16 2> /dev/null) || {
                     fail '生成 Shadowsocks 2022 密码失败'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 [[ -n "$value" ]] || {
                     fail '生成 Shadowsocks 2022 密码失败'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  密码：%s\n' "$value"
@@ -2035,7 +2041,7 @@ modify_ss2022_node() {
                 ;;
             *) fail '无效选择' ;;
         esac
-        pause_enter '  按回车返回修改节点菜单...' || return 1
+        pause_node_menu || return 1
     done
 }
 
@@ -2162,7 +2168,7 @@ modify_password_node() {
                 value=${value:-$name}
                 valid_name "$value" || {
                     fail '节点名称无效'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  节点名称：%s\n' "$value"
@@ -2174,7 +2180,7 @@ modify_password_node() {
                 value=${value:-$server}
                 valid_text "$value" || {
                     fail '客户端连接地址无效'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  客户端连接地址：%s\n' "$value"
@@ -2186,13 +2192,13 @@ modify_password_node() {
                 value=${value:-$port}
                 valid_port "$value" || {
                     fail '端口应为 1–65535'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 value=$((10#$value))
                 if ((value != port)) && port_conflict "$value" "$tag" "$network"; then
                     fail "${network^^} 端口 $value 已被占用"
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 printf '  监听端口：%s\n' "$value"
@@ -2204,13 +2210,13 @@ modify_password_node() {
                 if [[ -z "$value" ]]; then
                     value=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
                         fail "生成节点${credential_label}失败"
-                        pause_enter '  按回车返回修改节点菜单...' || return 1
+                        pause_node_menu || return 1
                         continue
                     }
                 fi
                 valid_password "$value" || {
                     fail "${credential_label}不能为空、不能超过 256 字或包含控制字符"
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 }
                 printf '  %s：%s\n' "$credential_label" "$value"
@@ -2220,28 +2226,28 @@ modify_password_node() {
             5)
                 if [[ "$protocol" != hysteria2 ]]; then
                     fail '无效选择'
-                    pause_enter '  按回车返回修改节点菜单...' || return 1
+                    pause_node_menu || return 1
                     continue
                 fi
                 modify_hy2_hop "$index"
                 ((MENU_CANCELLED || INPUT_EOF)) && return 1
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 continue
                 ;;
             *)
                 fail '无效选择'
-                pause_enter '  按回车返回修改节点菜单...' || return 1
+                pause_node_menu || return 1
                 continue
                 ;;
         esac
         if [[ "$value" == "$old_value" ]]; then
-            pause_enter '  按回车返回修改节点菜单...' || return 1
+            pause_node_menu || return 1
             continue
         fi
         if ! apply_password_node_update "$index" "$tag" "$protocol" "$name" "$server" "$port" "$password"; then
             return 1
         fi
-        pause_enter '  按回车返回修改节点菜单...' || return 1
+        pause_node_menu || return 1
     done
 }
 
@@ -2603,47 +2609,52 @@ menu_row() {
     printf '  %s║%s%*s%s║%s\n' "$BLUE" "$text" "$pad" '' "$BLUE" "$NC"
 }
 
+draw_main_menu() {
+    local count state core
+    count=$(node_count) || return 1
+    core=$(core_version)
+    if [[ ! -x "$SINGBOX_BIN" ]]; then
+        state='未安装'
+    elif svc_active; then
+        state='运行中'
+    else
+        state='已停止'
+    fi
+    printf '\n%s  ╔═══════════════════════════════════════╗\n' "$BLUE"
+    menu_row "    ${BLUE}sing-box 管理（当前节点：${GREEN}${count}${BLUE} 个）${NC}"
+    menu_row "    ${BLUE}sing-box 状态：${GREEN}${state}${BLUE}${NC}"
+    menu_row "    ${BLUE}sing-box 版本：${GREEN}${core}${BLUE}${NC}"
+    menu_row "    ${BLUE}管理脚本版本：${GREEN}v${SCRIPT_VERSION}${BLUE}${NC}"
+    printf '%s  ╠═══════════════════════════════════════╣%s\n' "$BLUE" "$NC"
+    menu_row "  ${BLUE}基础功能${NC}"
+    menu_row "  ${GREEN}[1]${BLUE}  添加节点${NC}"
+    menu_row "  ${GREEN}[2]${BLUE}  查看节点${NC}"
+    menu_row "  ${GREEN}[3]${BLUE}  修改节点${NC}"
+    menu_row "  ${GREEN}[4]${BLUE}  删除节点${NC}"
+    menu_row "  ${GREEN}[5]${BLUE}  清空节点${NC}"
+    printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
+    menu_row "  ${BLUE}服务管理${NC}"
+    menu_row "  ${GREEN}[6]${BLUE}  启动 sing-box${NC}"
+    menu_row "  ${GREEN}[7]${BLUE}  停止 sing-box${NC}"
+    menu_row "  ${GREEN}[8]${BLUE}  重启 sing-box${NC}"
+    printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
+    menu_row "  ${BLUE}更新与维护${NC}"
+    menu_row "  ${GREEN}[9]${BLUE}  安装/更新核心${NC}"
+    menu_row "  ${GREEN}[10]${BLUE} 更新管理脚本${NC}"
+    menu_row "  ${GREEN}[11]${BLUE} 一键卸载${NC}"
+    printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
+    menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
+    printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
+}
+
 menu() {
     # 操作结果停留到回车，返回菜单时再清屏
-    local count choice state core
+    local choice
     while true; do
         MENU_CANCELLED=0
         INPUT_EOF=0
         clear_terminal
-        count=$(node_count) || return 1
-        core=$(core_version)
-        if [[ ! -x "$SINGBOX_BIN" ]]; then
-            state='未安装'
-        elif svc_active; then
-            state='运行中'
-        else
-            state='已停止'
-        fi
-        printf '\n%s  ╔═══════════════════════════════════════╗\n' "$BLUE"
-        menu_row "    ${BLUE}sing-box 管理（当前节点：${GREEN}${count}${BLUE} 个）${NC}"
-        menu_row "    ${BLUE}sing-box 状态：${GREEN}${state}${BLUE}${NC}"
-        menu_row "    ${BLUE}sing-box 版本：${GREEN}${core}${BLUE}${NC}"
-        menu_row "    ${BLUE}管理脚本版本：${GREEN}v${SCRIPT_VERSION}${BLUE}${NC}"
-        printf '%s  ╠═══════════════════════════════════════╣%s\n' "$BLUE" "$NC"
-        menu_row "  ${BLUE}基础功能${NC}"
-        menu_row "  ${GREEN}[1]${BLUE}  添加节点${NC}"
-        menu_row "  ${GREEN}[2]${BLUE}  查看节点${NC}"
-        menu_row "  ${GREEN}[3]${BLUE}  修改节点${NC}"
-        menu_row "  ${GREEN}[4]${BLUE}  删除节点${NC}"
-        menu_row "  ${GREEN}[5]${BLUE}  清空节点${NC}"
-        printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
-        menu_row "  ${BLUE}服务管理${NC}"
-        menu_row "  ${GREEN}[6]${BLUE}  启动 sing-box${NC}"
-        menu_row "  ${GREEN}[7]${BLUE}  停止 sing-box${NC}"
-        menu_row "  ${GREEN}[8]${BLUE}  重启 sing-box${NC}"
-        printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
-        menu_row "  ${BLUE}更新与维护${NC}"
-        menu_row "  ${GREEN}[9]${BLUE}  安装/更新核心${NC}"
-        menu_row "  ${GREEN}[10]${BLUE} 更新管理脚本${NC}"
-        menu_row "  ${GREEN}[11]${BLUE} 一键卸载${NC}"
-        printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
-        menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
-        printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
+        draw_main_menu || return 1
         read_input choice '  请输入选项 [0-11]: ' || {
             ((INPUT_EOF || MENU_CANCELLED)) && return 0
             interrupt_exit

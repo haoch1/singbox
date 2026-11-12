@@ -131,14 +131,16 @@ apply_transaction() {
 }
 fixture() {
     : > "$work/transactions"
+    : > "$work/redraws"
     jq -n --arg protocol "${1:-vless-reality}" '{nodes:[{protocol:$protocol,tag:"test",name:"original",server:"example.com",port:1080,
         uuid:"11111111-1111-1111-1111-111111111111",sni:"old.example",public_key:"old-public",short_id:"1234",password:"old-secret",psk:"old-secret",version:5}]}' > "$META_FILE"
     jq -n --arg protocol "${1:-vless-reality}" '{inbounds:[{tag:"test",type:(if $protocol=="vless-reality" then "vless" elif $protocol=="ss2022" then "shadowsocks" else $protocol end),
         version:5,listen_port:1080,password:"old-secret",psk:"old-secret",users:[{uuid:"11111111-1111-1111-1111-111111111111",password:"old-secret"}],
         tls:{server_name:"old.example",reality:{handshake:{server:"old.example"},private_key:"old-private",short_id:["1234"]}}}]}' > "$CONFIG_FILE"
 }
-# Editors must retain the main menu displayed before selecting a node.
-clear_terminal() { bad 'editor cleared the main menu'; }
+# Returning from an edit must clear once, then restore the main menu context.
+clear_terminal() { printf 'clear\n' >> "$work/redraws"; }
+draw_main_menu() { printf 'main\n' >> "$work/redraws"; }
 for protocol in vless-reality ss2022 anytls hysteria2 snell; do
     fixture "$protocol"
     reset_case
@@ -151,6 +153,9 @@ for protocol in vless-reality ss2022 anytls hysteria2 snell; do
     check modify_node <<< $'1\n'"$edit_input" > "$work/output" 2>&1
     prompt_count "$((reads + 1))"
     check test "$(wc -l < "$work/transactions")" -eq "$expected"
+    expected_redraws=''
+    for ((redraw=0; redraw<expected; redraw++)); do expected_redraws+=$'clear\nmain\n'; done
+    check test "$(cat "$work/redraws")" = "${expected_redraws%$'\n'}"
     check jq -e '.nodes[0] | .name=="new-name" and .server=="new.example" and .port==20000' "$META_FILE" >/dev/null
     check jq -e '.inbounds[0].listen_port==20000' "$CONFIG_FILE" >/dev/null
     if [[ $protocol == vless-reality ]]; then
@@ -166,16 +171,19 @@ for reply in q Q; do
     modify_node <<< $'1\n1\n'"$reply" > "$work/output" 2>&1 && bad 'cancelled edit succeeded'
     prompt_count 3
     check test ! -s "$work/transactions"
+    check test ! -s "$work/redraws"
 done
 fixture
 reset_case
 modify_node <<< $'1\n1' > "$work/output" 2>&1 && bad 'EOF edit succeeded'
 check test "$INPUT_EOF" -eq 1
 check test ! -s "$work/transactions"
+check test ! -s "$work/redraws"
 reset_case
 check modify_node <<< $'1\n1\n\n\n0' > "$work/output" 2>&1
 prompt_count 5
 check test ! -s "$work/transactions"
+check test "$(cat "$work/redraws")" = $'clear\nmain'
 pass 'cancelled, unchanged and incomplete edits do not save'
 
 for reply in '' 0 00 q Q; do
