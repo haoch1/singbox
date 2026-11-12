@@ -1293,16 +1293,45 @@ generate_self_signed_tls() {
     [[ "$NEW_TLS_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || return 1
 }
 
+# === 节点创建的公共输入与候选文件 ===
+read_node_server() {
+    local destination=$1 server_address
+    server_address=$(server_ip_guess)
+    read_input server_address "  服务器地址 (回车使用 ${server_address:-需手动输入}): " || return 1
+    server_address=${server_address:-$(server_ip_guess)}
+    while [[ -z "$server_address" ]] || ! valid_text "$server_address"; do
+        fail '请输入有效的 IP 或域名'
+        read_input server_address '  服务器地址: ' || return 1
+    done
+    printf -v "$destination" '%s' "$server_address"
+}
+
+read_node_name() {
+    local destination=$1 default_name=$2 node_name=$2
+    read_input node_name "  节点名称 (默认 $default_name): " || return 1
+    node_name=${node_name:-$default_name}
+    valid_name "$node_name" || {
+        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
+        return 1
+    }
+    printf -v "$destination" '%s' "$node_name"
+}
+
+create_node_temp_files() {
+    local config_destination=$1 meta_destination=$2 config_candidate meta_candidate
+    config_candidate=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
+    meta_candidate=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
+        rm -f "$config_candidate"
+        return 1
+    }
+    printf -v "$config_destination" '%s' "$config_candidate"
+    printf -v "$meta_destination" '%s' "$meta_candidate"
+}
+
 add_vless_node() {
     require_core || return 1
     local server port sni name id tag uuid private public sid current_count
-    server=$(server_ip_guess)
-    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
-    server=${server:-$(server_ip_guess)}
-    while [[ -z "$server" ]] || ! valid_text "$server"; do
-        fail '请输入有效的 IP 或域名'
-        read_input server '  服务器地址: ' || return 1
-    done
+    read_node_server server || return 1
     port="$DEFAULT_PORT"
     while true; do
         read_input port "  监听端口 (默认 $DEFAULT_PORT): " || return 1
@@ -1325,13 +1354,7 @@ add_vless_node() {
         fail '伪装域名格式无效'
         return 1
     }
-    name="Vless-$port"
-    read_input name "  节点名称 (默认 $name): " || return 1
-    name=${name:-"Vless-$port"}
-    valid_name "$name" || {
-        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
-        return 1
-    }
+    read_node_name name "Vless-$port" || return 1
     generate_credentials || {
         fail '生成节点凭据失败'
         return 1
@@ -1343,11 +1366,7 @@ add_vless_node() {
     id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null || printf '%s' "$(date +%s%N)")
     tag="vless-in-$id"
     local new_config new_meta
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     jq --arg tag "$tag" --arg sni "$sni" --arg private "$private" --arg sid "$sid" --arg uuid "$uuid" --argjson port "$port" \
         '.inbounds += [{type:"vless",tag:$tag,listen:"::",listen_port:$port,users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],tls:{enabled:true,server_name:$sni,reality:{enabled:true,handshake:{server:$sni,server_port:443},private_key:$private,short_id:[$sid]}}}]' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
@@ -1372,13 +1391,7 @@ add_vless_node() {
 add_ss2022_node() {
     require_core || return 1
     local server port name id tag password current_count new_config new_meta
-    server=$(server_ip_guess)
-    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
-    server=${server:-$(server_ip_guess)}
-    while [[ -z "$server" ]] || ! valid_text "$server"; do
-        fail '请输入有效的 IP 或域名'
-        read_input server '  服务器地址: ' || return 1
-    done
+    read_node_server server || return 1
     port="$DEFAULT_SS_PORT"
     while true; do
         read_input port "  监听端口 (默认 $DEFAULT_SS_PORT): " || return 1
@@ -1394,13 +1407,7 @@ add_ss2022_node() {
         }
         break
     done
-    name="SS2022-$port"
-    read_input name "  节点名称 (默认 $name): " || return 1
-    name=${name:-"SS2022-$port"}
-    valid_name "$name" || {
-        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
-        return 1
-    }
+    read_node_name name "SS2022-$port" || return 1
     password=$("$SINGBOX_BIN" generate rand --base64 16 2> /dev/null) || {
         fail '生成 Shadowsocks 2022 密码失败'
         return 1
@@ -1411,11 +1418,7 @@ add_ss2022_node() {
     }
     id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null || printf '%s' "$(date +%s%N)")
     tag="ss-in-$id"
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     jq --arg tag "$tag" --arg password "$password" --argjson port "$port" \
         '.inbounds += [{type:"shadowsocks",tag:$tag,listen:"::",listen_port:$port,method:"2022-blake3-aes-128-gcm",password:$password}]' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
@@ -1440,13 +1443,7 @@ add_ss2022_node() {
 add_snell_node() {
     require_snell_core || return 1
     local server port name psk id tag current_count new_config new_meta
-    server=$(server_ip_guess)
-    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
-    server=${server:-$(server_ip_guess)}
-    while [[ -z "$server" ]] || ! valid_text "$server"; do
-        fail '请输入有效的 IP 或域名'
-        read_input server '  服务器地址: ' || return 1
-    done
+    read_node_server server || return 1
     while true; do
         read_input port "  监听端口 (默认 $DEFAULT_SNELL_PORT): " || return 1
         port=${port:-$DEFAULT_SNELL_PORT}
@@ -1461,13 +1458,7 @@ add_snell_node() {
         }
         break
     done
-    name="Snell-$port"
-    read_input name "  节点名称 (默认 $name): " || return 1
-    name=${name:-"Snell-$port"}
-    valid_name "$name" || {
-        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
-        return 1
-    }
+    read_node_name name "Snell-$port" || return 1
     psk=$("$SINGBOX_BIN" generate rand --hex 32 2> /dev/null) || {
         fail '生成 Snell PSK 失败'
         return 1
@@ -1478,11 +1469,7 @@ add_snell_node() {
     }
     id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null) || return 1
     tag="snell-in-$id"
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     jq --arg tag "$tag" --arg psk "$psk" --argjson port "$port" --argjson version "$SNELL_VERSION" '
         .inbounds += [{type:"snell",tag:$tag,listen:"::",listen_port:$port,version:$version,psk:$psk}]' \
         "$CONFIG_FILE" > "$new_config" || {
@@ -1520,13 +1507,7 @@ add_tls_node() {
         default_port=$DEFAULT_ANYTLS_PORT
         mode=tcp
     fi
-    server=$(server_ip_guess)
-    read_input server "  服务器地址 (回车使用 ${server:-需手动输入}): " || return 1
-    server=${server:-$(server_ip_guess)}
-    while [[ -z "$server" ]] || ! valid_text "$server"; do
-        fail '请输入有效的 IP 或域名'
-        read_input server '  服务器地址: ' || return 1
-    done
+    read_node_server server || return 1
     while true; do
         read_input port "  监听端口 (默认 $default_port): " || return 1
         port=${port:-$default_port}
@@ -1541,13 +1522,7 @@ add_tls_node() {
         }
         break
     done
-    name="$label-$port"
-    read_input name "  节点名称 (默认 $name): " || return 1
-    name=${name:-"$label-$port"}
-    valid_name "$name" || {
-        fail '节点名称不能为空、不能超过 80 字或包含控制字符'
-        return 1
-    }
+    read_node_name name "$label-$port" || return 1
     if [[ "$protocol" == hysteria2 ]]; then
         if default_range=$(hy2_default_hop_range "$port"); then
             range_hint="默认 $default_range"
@@ -1581,11 +1556,7 @@ add_tls_node() {
     id=$("$SINGBOX_BIN" generate rand --hex 8 2> /dev/null) || return 1
     [[ "$id" =~ ^[0-9a-f]{16}$ ]] || return 1
     tag="$protocol-in-$id"
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     jq --arg protocol "$protocol" --arg tag "$tag" --arg password "$password" \
         --arg obfs_password "$obfs_password" --argjson port "$port" --argjson tls "$NEW_TLS_JSON" '
         .inbounds += [{type:$protocol,tag:$tag,listen:"::",listen_port:$port,
@@ -1696,11 +1667,7 @@ view_nodes() {
 apply_vless_node_update() {
     local index="$1" tag="$2" name="$3" server="$4" port="$5" sni="$6" uuid="$7" public="$8" sid="$9" private="${10}"
     local new_config new_meta count config_matches meta_matches
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE" 2> /dev/null) || {
         rm -f "$new_config" "$new_meta"
         fail '目标节点配置读取失败'
@@ -1909,11 +1876,7 @@ modify_vless_node() {
 apply_ss2022_node_update() {
     local tag="$1" name="$2" server="$3" port="$4" password="$5"
     local new_config new_meta count config_matches meta_matches
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     config_matches=$(jq -r --arg tag "$tag" '[.inbounds[]? | select(.tag==$tag)] | length' "$CONFIG_FILE") || {
         rm -f "$new_config" "$new_meta"
         return 1
@@ -2060,11 +2023,7 @@ apply_password_node_update() {
         fail '目标节点信息不一致，未应用修改，请重新进入菜单'
         return 1
     }
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     jq --arg tag "$tag" --arg password "$password" --arg protocol "$protocol" --argjson port "$port" '
         (.inbounds[] | select(.tag==$tag)) |= (.listen_port=$port
             | if $protocol == "snell" then .psk=$password else .users[0].password=$password end)' "$CONFIG_FILE" > "$new_config" || {
@@ -2272,11 +2231,7 @@ delete_node() {
     choose_node index '删除' || return 1
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     jq --arg tag "$tag" 'del(.inbounds[] | select(.tag==$tag))' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
@@ -2303,11 +2258,7 @@ clear_nodes() {
         return 0
     }
     confirm_action "确认清空全部 $count 个节点？" || return 1
-    new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
-    new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
-        rm -f "$new_config"
-        return 1
-    }
+    create_node_temp_files new_config new_meta || return 1
     jq '.inbounds=[]' "$CONFIG_FILE" > "$new_config" || {
         rm -f "$new_config" "$new_meta"
         return 1
