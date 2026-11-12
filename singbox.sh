@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.5.7"
+SCRIPT_VERSION="1.5.8"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -63,12 +63,6 @@ success() {
 interrupt_exit() {
     printf '\n'
     exit 130
-}
-
-clear_terminal() {
-    [[ -t 1 ]] || return 0
-    command -v clear > /dev/null 2>&1 && clear 2> /dev/null || true
-    printf '\033[3J\033[2J\033[H\033[0m'
 }
 
 # === 日志轮转与临时文件维护 ===
@@ -231,12 +225,16 @@ read_input() {
     printf -v "$dest" '%s' "$input_value"
 }
 
-pause_enter() {
-    local prompt="${1:-  按回车返回主菜单...}" status=0
-    read -r -p "$prompt" _ || status=$?
-    ((status == 130)) && interrupt_exit
-    ((status != 0)) && INPUT_EOF=1
-    return 0
+confirm_action() {
+    local prompt=$1 answer
+    while true; do
+        read_input answer "  $prompt [y/N]: " || return 1
+        case "$answer" in
+            y | Y) return 0 ;;
+            n | N | '') MENU_CANCELLED=1; return 1 ;;
+            *) fail '请输入 y 或 n（回车取消）' ;;
+        esac
+    done
 }
 
 # === 依赖、初始化系统与服务控制 ===
@@ -1625,16 +1623,21 @@ print_nodes() {
 }
 
 choose_node() {
-    local result="$1" choice count
+    local result=$1 action=${2:-选择} choice count prompt
     count=$(node_count)
     ((count > 0)) || {
         warn '当前没有节点'
         return 1
     }
     print_nodes
-    read_input choice '  请输入节点序号 (0 取消): ' || return 1
+    prompt="  请输入要${action}的序号 (0 返回): "
+    [[ $action != 删除 ]] || prompt='  请输入要删除的序号 (选中即删除，0 返回): '
+    read_input choice "$prompt" || return 1
+    [[ -n $choice ]] || {
+        MENU_CANCELLED=1
+        return 1
+    }
     [[ "$choice" =~ ^[0-9]+$ && ${#choice} -le 6 ]] || {
-        [[ -z "$choice" ]] && return 1
         fail '无效选择'
         return 1
     }
@@ -1723,20 +1726,6 @@ apply_vless_node_update() {
     fi
 }
 
-confirm_node_update() {
-    local answer
-    read_input answer '  确认保存并应用本次修改？[Y/N]: ' || return 1
-    [[ "$answer" =~ ^[nN]$ ]] && {
-        warn '已取消本次修改'
-        return 1
-    }
-    [[ -z "$answer" || "$answer" == [yY] ]] || {
-        fail '请输入 Y 或 N'
-        return 1
-    }
-    return 0
-}
-
 modify_vless_node() {
     local index="$1" tag name server port sni uuid public sid private choice value field
     local -a fields
@@ -1760,12 +1749,11 @@ modify_vless_node() {
             "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
         case "$choice" in
-            0) return 0 ;;
+            0 | '') return 0 ;;
             1)
                 read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  节点名称：%s\n' "$name"
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
                 valid_name "$value" || {
@@ -1774,22 +1762,15 @@ modify_vless_node() {
                 }
                 printf '  节点名称：%s\n' "$value"
                 if [[ "$value" == "$name" ]]; then
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
-                    continue
-                }
                 apply_vless_node_update "$index" "$tag" "$value" "$server" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             2)
                 read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  客户端连接地址：%s\n' "$server"
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
                 valid_text "$value" || {
@@ -1798,22 +1779,15 @@ modify_vless_node() {
                 }
                 printf '  客户端连接地址：%s\n' "$value"
                 if [[ "$value" == "$server" ]]; then
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
-                    continue
-                }
                 apply_vless_node_update "$index" "$tag" "$name" "$value" "$port" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             3)
                 read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  监听端口：%s\n' "$port"
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
                 valid_port "$value" || {
@@ -1827,15 +1801,9 @@ modify_vless_node() {
                 fi
                 printf '  监听端口：%s\n' "$value"
                 if ((value == port)); then
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
-                    continue
-                }
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$value" "$sni" "$uuid" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             4)
@@ -1853,22 +1821,15 @@ modify_vless_node() {
                 }
                 printf '  UUID：%s\n' "$value"
                 if [[ "$value" == "$uuid" ]]; then
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
-                    continue
-                }
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$value" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             5)
                 read_input value "  请输入新的伪装域名/SNI (回车保持 $sni): " || return 1
                 if [[ -z "$value" ]]; then
                     printf '  伪装域名/SNI：%s\n' "$sni"
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
                 valid_text "$value" || {
@@ -1877,15 +1838,9 @@ modify_vless_node() {
                 }
                 printf '  伪装域名/SNI：%s\n' "$value"
                 if [[ "$value" == "$sni" ]]; then
-                    pause_enter '  按回车返回修改节点菜单...'
                     continue
                 fi
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
-                    continue
-                }
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$value" "$uuid" "$public" "$sid" "$private" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             6)
@@ -1895,12 +1850,7 @@ modify_vless_node() {
                 }
                 printf '  Reality 私钥：%s\n  Reality 公钥：%s\n  Short ID：%s\n' \
                     "$NEW_PRIVATE" "$NEW_PUBLIC" "$NEW_SHORT_ID"
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
-                    continue
-                }
                 apply_vless_node_update "$index" "$tag" "$name" "$server" "$port" "$sni" "$uuid" "$NEW_PUBLIC" "$NEW_SHORT_ID" "$NEW_PRIVATE" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             *) fail '无效选择' ;;
@@ -1975,7 +1925,7 @@ modify_ss2022_node() {
         printf '  %s[1]%s 修改节点名称\n  %s[2]%s 修改客户端连接地址\n  %s[3]%s 修改监听端口\n  %s[4]%s 重新生成密码\n  %s[0]%s 返回\n' "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC" "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
         case "$choice" in
-            0) return 0 ;;
+            0 | '') return 0 ;;
             1)
                 read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
                 value=${value:-$name}
@@ -1985,15 +1935,9 @@ modify_ss2022_node() {
                 }
                 printf '  节点名称：%s\n' "$value"
                 [[ "$value" == "$name" ]] && {
-                    pause_enter '  按回车返回修改节点菜单...'
-                    continue
-                }
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
                     continue
                 }
                 apply_ss2022_node_update "$tag" "$value" "$server" "$port" "$password" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 ;;
             2)
                 read_input value "  请输入新的客户端连接地址 (回车保持 $server): " || return 1
@@ -2004,15 +1948,9 @@ modify_ss2022_node() {
                 }
                 printf '  客户端连接地址：%s\n' "$value"
                 [[ "$value" == "$server" ]] && {
-                    pause_enter '  按回车返回修改节点菜单...'
-                    continue
-                }
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
                     continue
                 }
                 apply_ss2022_node_update "$tag" "$name" "$value" "$port" "$password" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 ;;
             3)
                 read_input value "  请输入新的监听端口 (回车保持 $port): " || return 1
@@ -2028,15 +1966,9 @@ modify_ss2022_node() {
                 fi
                 printf '  监听端口：%s\n' "$value"
                 ((value == port)) && {
-                    pause_enter '  按回车返回修改节点菜单...'
-                    continue
-                }
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
                     continue
                 }
                 apply_ss2022_node_update "$tag" "$name" "$server" "$value" "$password" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 ;;
             4)
                 value=$("$SINGBOX_BIN" generate rand --base64 16 2> /dev/null) || {
@@ -2048,12 +1980,7 @@ modify_ss2022_node() {
                     continue
                 }
                 printf '  密码：%s\n' "$value"
-                confirm_node_update || {
-                    ((MENU_CANCELLED)) && return 1
-                    continue
-                }
                 apply_ss2022_node_update "$tag" "$name" "$server" "$port" "$value" || return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 ;;
             *) fail '无效选择' ;;
         esac
@@ -2177,7 +2104,7 @@ modify_password_node() {
         printf '  %s[0]%s 返回\n' "$GREEN" "$NC"
         read_input choice '  请选择修改项: ' || return 1
         case "$choice" in
-            0) return 0 ;;
+            0 | '') return 0 ;;
             1)
                 read_input value "  请输入新节点名称 (回车保持 $name): " || return 1
                 value=${value:-$name}
@@ -2239,7 +2166,6 @@ modify_password_node() {
                 fi
                 modify_hy2_hop "$index"
                 ((MENU_CANCELLED || INPUT_EOF)) && return 1
-                pause_enter '  按回车返回修改节点菜单...'
                 continue
                 ;;
             *)
@@ -2248,24 +2174,18 @@ modify_password_node() {
                 ;;
         esac
         if [[ "$value" == "$old_value" ]]; then
-            pause_enter '  按回车返回修改节点菜单...'
             continue
         fi
-        confirm_node_update || {
-            ((MENU_CANCELLED || INPUT_EOF)) && return 1
-            continue
-        }
         if ! apply_password_node_update "$index" "$tag" "$protocol" "$name" "$server" "$port" "$password"; then
             return 1
         fi
-        pause_enter '  按回车返回修改节点菜单...'
     done
 }
 
 modify_node() {
     local index protocol
     require_core || return 1
-    choose_node index || return 1
+    choose_node index '修改' || return 1
     protocol=$(jq -r --argjson i "$index" '.nodes[$i].protocol // "vless-reality"' "$META_FILE")
     case "$protocol" in
         vless-reality) modify_vless_node "$index" ;;
@@ -2279,12 +2199,10 @@ modify_node() {
 }
 
 delete_node() {
-    local index tag name answer new_config new_meta count
-    choose_node index || return 1
+    local index tag name new_config new_meta count
+    choose_node index '删除' || return 1
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     name=$(jq -r --argjson i "$index" '.nodes[$i].name' "$META_FILE")
-    read_input answer "  确认删除节点 [$name]？(Y/N): " || return 1
-    [[ "$answer" == [yY] ]] || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
     new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
         rm -f "$new_config"
@@ -2309,14 +2227,13 @@ delete_node() {
 }
 
 clear_nodes() {
-    local count answer new_config new_meta
+    local count new_config new_meta
     count=$(node_count)
     ((count > 0)) || {
         warn '暂无节点'
         return 0
     }
-    read_input answer "  确认清空全部 $count 个节点？(Y/N): " || return 1
-    [[ "$answer" == [yY] ]] || return 1
+    confirm_action "确认清空全部 $count 个节点？" || return 1
     new_config=$(mktemp "$SINGBOX_DIR/.config.XXXXXX") || return 1
     new_meta=$(mktemp "$SINGBOX_DIR/.meta.XXXXXX") || {
         rm -f "$new_config"
@@ -2520,9 +2437,8 @@ remove_uninstall_paths() {
 }
 
 uninstall() {
-    local answer leftover hop_plan=''
-    read_input answer '  确认卸载 sing-box、全部节点和管理脚本？(Y/N): ' || return 1
-    [[ "$answer" == [yY] ]] || return 1
+    local leftover hop_plan=''
+    confirm_action '确认卸载 sing-box、全部节点、备份和管理脚本？' || return 1
     check_uninstall_services || return 1
     if ! svc_stop; then
         fail 'sing-box 停止失败，未执行卸载'
@@ -2625,11 +2541,11 @@ menu_row() {
 }
 
 menu() {
+    # 自动返回时保留操作结果和分享链接，不清屏或额外等待回车
     local count choice state core
     while true; do
         MENU_CANCELLED=0
         INPUT_EOF=0
-        clear_terminal
         count=$(node_count) || return 1
         core=$(core_version)
         if [[ ! -x "$SINGBOX_BIN" ]]; then
@@ -2664,10 +2580,11 @@ menu() {
         printf '%s  ║%39s║%s\n' "$BLUE" '' "$NC"
         menu_row "  ${GREEN}[0]${BLUE}  退出脚本${NC}"
         printf '%s  ╚═══════════════════════════════════════╝%s\n\n' "$BLUE" "$NC"
-        local status=0
-        read -r -p '  请输入选项 [0-11]: ' choice || status=$?
-        ((status == 130)) && interrupt_exit
-        ((status != 0)) && return 0
+        printf '  提示：修改直接生效；q 取消/退出；清空和卸载需确认。\n\n'
+        read_input choice '  请输入选项 [0-11] (q 退出): ' || {
+            ((INPUT_EOF || MENU_CANCELLED)) && return 0
+            interrupt_exit
+        }
         case "$choice" in
             1) add_node ;; 2) view_nodes ;; 3) modify_node ;; 4) delete_node ;; 5) clear_nodes ;;
             6)
@@ -2688,15 +2605,12 @@ menu() {
             9) update_core ;;
             10)
                 if update_management_script; then
-                    pause_enter '  按回车加载最新脚本...'
-                    ((INPUT_EOF)) && return 0
                     exec bash "${SCRIPT_TARGET:-$0}"
                 fi
                 ;;
             11) uninstall && return 0 ;; 0) return 0 ;;
             *) fail '无效选项' ;;
         esac
-        ((MENU_CANCELLED)) || pause_enter
         ((INPUT_EOF)) && return 0
     done
 }
