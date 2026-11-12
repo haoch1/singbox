@@ -7,7 +7,7 @@ umask 077
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 # === 运行时路径与版本 ===
-SCRIPT_VERSION="1.5.8"
+SCRIPT_VERSION="1.5.9"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/haoch1/singbox/main/singbox.sh}"
 SINGBOX_DIR="${SINGBOX_DIR:-/usr/local/etc/sing-box}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
@@ -63,6 +63,11 @@ success() {
 interrupt_exit() {
     printf '\n'
     exit 130
+}
+
+clear_terminal() {
+    [[ -t 1 ]] || return 0
+    printf '\033[2J\033[H\033[0m'
 }
 
 # === 日志轮转与临时文件维护 ===
@@ -235,6 +240,13 @@ confirm_action() {
             *) fail '请输入 y 或 n（回车取消）' ;;
         esac
     done
+}
+
+wait_for_reload() {
+    local status=0
+    read -r -p '  按回车加载最新脚本...' _ || status=$?
+    ((status == 130)) && interrupt_exit
+    ((status == 0))
 }
 
 # === 依赖、初始化系统与服务控制 ===
@@ -2541,8 +2553,9 @@ menu_row() {
 }
 
 menu() {
-    # 自动返回时保留操作结果和分享链接，不清屏或额外等待回车
+    # 首次进入或加载新版时清屏，后续自动返回时保留操作结果和分享链接
     local count choice state core
+    clear_terminal
     while true; do
         MENU_CANCELLED=0
         INPUT_EOF=0
@@ -2605,6 +2618,7 @@ menu() {
             9) update_core ;;
             10)
                 if update_management_script; then
+                    wait_for_reload || return 0
                     exec bash "${SCRIPT_TARGET:-$0}"
                 fi
                 ;;
