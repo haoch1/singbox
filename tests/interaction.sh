@@ -45,7 +45,7 @@ confirm_action 'confirm' < /dev/null > "$work/output" 2>&1 && bad 'EOF confirmed
 check test "$INPUT_EOF" -eq 1
 pass 'confirmation defaults, invalid input, q/Q and EOF'
 
-# Menu effects use markers; reading a result must never consume the next option.
+# Each operation must wait for Enter before drawing the main menu again.
 menu_effect() { printf '%s\n' "$1" >> "$work/actions"; printf 'result:%s\n' "$1"; }
 setup_menu_stubs() {
     core_version() { printf '1.14.0'; }
@@ -63,14 +63,21 @@ setup_menu_stubs() {
     setup_menu_stubs
     : > "$work/actions"
     reset_case
-    menu <<< $'2\n6\n7\n8\n9\nq' > "$work/output" 2>&1 || bad 'menu failed'
+    menu <<< $'2\n\n6\n\n7\n\n8\n\n9\n\nq' > "$work/output" 2>&1 || bad 'menu failed'
     check test "$(cat "$work/actions")" = $'view\nstart\nstop\nrestart\ncore'
-    prompt_count 6
+    prompt_count 11
+    check test "$(grep -c '按回车返回主菜单' "$work/prompts")" -eq 5
     check grep -q 'result:view' "$work/output"
     if grep -q $'\033\\[' "$work/output"; then
         # Colour is fine; erase-screen and erase-scrollback escape codes are not.
         grep -qE $'\033\\[(2J|3J|H)' "$work/output" && bad 'result was cleared'
     fi
+    reset_case
+    menu <<< 2 > "$work/output" 2>&1 || bad 'result pause EOF failed'
+    prompt_count 2
+    check grep -q '按回车返回主菜单' "$work/prompts"
+    check test "$(grep -c '请输入选项' "$work/prompts")" -eq 1
+    check grep -q 'result:view' "$work/output"
     reset_case
     menu < /dev/null > "$work/output" 2>&1 || bad 'menu EOF failed'
     prompt_count 1
@@ -78,9 +85,14 @@ setup_menu_stubs() {
     menu <<< Q > "$work/output" 2>&1 || bad 'Q did not exit'
     prompt_count 1
     reset_case
-    menu <<< $'invalid\n0' > "$work/output" 2>&1 || bad 'invalid menu input failed'
-    prompt_count 2
-    pass 'consecutive actions, visible results, invalid menu input and exit'
+    menu <<< $'invalid\n\n0' > "$work/output" 2>&1 || bad 'invalid menu input failed'
+    prompt_count 3
+    add_node() { read_input cancelled 'cancel test'; }
+    reset_case
+    menu <<< $'1\nq\n0' > "$work/output" 2>&1 || bad 'cancel failed'
+    prompt_count 3
+    grep -q '按回车返回' "$work/prompts" && bad 'cancel asked for another Enter'
+    pass 'results wait for Enter, menus do not redraw early, cancellation returns directly'
 ) || exit 1
 
 # Reload is intercepted here so no installed command or real service is touched.
@@ -128,11 +140,11 @@ fixture() {
 for protocol in vless-reality ss2022 anytls hysteria2 snell; do
     fixture "$protocol"
     reset_case
-    edit_input=$'1\nnew-name\n2\nnew.example\n3\n20000\n4'
+    edit_input=$'1\nnew-name\n\n2\nnew.example\n\n3\n20000\n\n4'
     case $protocol in
-        vless-reality) edit_input+=$'\n22222222-2222-2222-2222-222222222222\n5\nnew.sni\n6\n0'; expected=6; reads=12 ;;
-        ss2022) edit_input+=$'\n0'; expected=4; reads=8 ;;
-        *) edit_input+=$'\nnew-secret\n0'; expected=4; reads=9 ;;
+        vless-reality) edit_input+=$'\n22222222-2222-2222-2222-222222222222\n\n5\nnew.sni\n\n6\n\n0'; expected=6; reads=18 ;;
+        ss2022) edit_input+=$'\n\n0'; expected=4; reads=12 ;;
+        *) edit_input+=$'\nnew-secret\n\n0'; expected=4; reads=13 ;;
     esac
     check modify_node <<< $'1\n'"$edit_input" > "$work/output" 2>&1
     prompt_count "$((reads + 1))"
@@ -144,7 +156,7 @@ for protocol in vless-reality ss2022 anytls hysteria2 snell; do
     else
         check jq -e '.nodes[0] | (if .protocol=="snell" then .psk else .password end)=="new-secret"' "$META_FILE" >/dev/null
     fi
-    pass "$protocol edits apply each selected field without confirmation or pause"
+    pass "$protocol edits apply without save confirmation and wait before returning"
 done
 for reply in q Q; do
     fixture
@@ -159,8 +171,8 @@ modify_node <<< $'1\n1' > "$work/output" 2>&1 && bad 'EOF edit succeeded'
 check test "$INPUT_EOF" -eq 1
 check test ! -s "$work/transactions"
 reset_case
-check modify_node <<< $'1\n1\n\n0' > "$work/output" 2>&1
-prompt_count 4
+check modify_node <<< $'1\n1\n\n\n0' > "$work/output" 2>&1
+prompt_count 5
 check test ! -s "$work/transactions"
 pass 'cancelled, unchanged and incomplete edits do not save'
 
