@@ -137,6 +137,8 @@ fixture() {
         version:5,listen_port:1080,password:"old-secret",psk:"old-secret",users:[{uuid:"11111111-1111-1111-1111-111111111111",password:"old-secret"}],
         tls:{server_name:"old.example",reality:{handshake:{server:"old.example"},private_key:"old-private",short_id:["1234"]}}}]}' > "$CONFIG_FILE"
 }
+# Editors must retain the main menu displayed before selecting a node.
+clear_terminal() { bad 'editor cleared the main menu'; }
 for protocol in vless-reality ss2022 anytls hysteria2 snell; do
     fixture "$protocol"
     reset_case

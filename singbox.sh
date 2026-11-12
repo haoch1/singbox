@@ -1747,7 +1747,6 @@ modify_vless_node() {
     local -a fields
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
-        clear_terminal
         fields=()
         while IFS= read -r -d '' field; do
             while [[ $field == *$'\n' ]]; do field=${field%$'\n'}; done
@@ -1955,7 +1954,6 @@ modify_ss2022_node() {
     local -a fields
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
-        clear_terminal
         fields=()
         while IFS= read -r -d '' field; do
             while [[ $field == *$'\n' ]]; do field=${field%$'\n'}; done
@@ -2138,7 +2136,6 @@ modify_password_node() {
     local -a fields
     tag=$(jq -r --argjson i "$index" '.nodes[$i].tag' "$META_FILE")
     while true; do
-        clear_terminal
         fields=()
         while IFS= read -r -d '' field; do fields+=("$field"); done < <(node_fields "$index")
         protocol=${fields[0]-}
